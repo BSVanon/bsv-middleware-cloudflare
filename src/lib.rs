@@ -126,7 +126,7 @@ pub use middleware::multipart::prepare_multipart_payment;
 pub use middleware::payment::{
     add_payment_headers, payment_headers, process_payment, PaymentMiddlewareOptions, PaymentResult,
 };
-pub use storage::{KvPaymentStorage, KvSessionStorage, SessionStorage};
+pub use storage::{D1SessionStorage, KvPaymentStorage, KvSessionStorage, SessionStorage};
 pub use transport::{auth_headers, CloudflareTransport, HttpRequestData, HttpResponseData};
 pub use types::{AuthContext, BsvPayment, PaymentContext};
 

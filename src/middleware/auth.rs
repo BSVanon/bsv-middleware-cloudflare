@@ -51,6 +51,18 @@ pub struct AuthMiddlewareOptions {
     pub certificates_to_request: Option<RequestedCertificateSet>,
     /// Session TTL in seconds (default: 3600 = 1 hour).
     pub session_ttl_seconds: u64,
+    /// Minimum seconds between persistent `update_session` writes per session.
+    /// Per-message touches inside this window are skipped — the in-memory
+    /// session still reflects the new activity for the rest of the request,
+    /// but the durable store is only written when `now - last_update >=
+    /// session_touch_debounce_seconds`.
+    ///
+    /// Default `30` keeps a heavily-trafficked session's write rate at
+    /// ≤ 2/min, which on Cloudflare KV's 1k-writes/day free tier means a
+    /// single wallet can sustain hours of activity without running quota.
+    /// Set to `0` to restore the pre-debounce behavior of writing on every
+    /// authenticated request.
+    pub session_touch_debounce_seconds: u64,
     /// Callback when certificates are received.
     #[allow(clippy::type_complexity)]
     pub on_certificates_received:
@@ -64,9 +76,18 @@ impl Default for AuthMiddlewareOptions {
             allow_unauthenticated: false,
             certificates_to_request: None,
             session_ttl_seconds: 3600,
+            session_touch_debounce_seconds: 30,
             on_certificates_received: None,
         }
     }
+}
+
+/// Returns the current time in milliseconds since epoch, using
+/// Cloudflare Workers' `Date::now`. Matches the unit `StoredSession::touch`
+/// writes into `last_update` (via `crate::types::current_time_ms`), so
+/// arithmetic between the two is direct.
+fn current_time_ms_for_touch() -> u64 {
+    crate::types::current_time_ms()
 }
 
 /// Session info needed for signing responses.
@@ -249,9 +270,25 @@ pub async fn process_auth_with_storage<S: SessionStorage + ?Sized>(
     //   2. processGeneralMessage throws → general message callbacks never fire
     //   3. AuthFetch Promise never resolves → 402 payment handling breaks
     //   4. Signature keyID mismatch (uses peer_nonce, client expects handshake nonce)
-    let mut updated_session = session.clone();
-    updated_session.touch();
-    session_storage.update_session(&updated_session).await?;
+    //
+    // Debounce: only persist the touch when the on-disk `last_update` is older
+    // than `session_touch_debounce_seconds` (default 30s). The previous behavior
+    // was a write per authenticated request — on Cloudflare KV's free tier
+    // (1k writes/day) a wallet doing storage-sync hit 50% by 250 requests/day.
+    // The session's TTL is still set to `session_ttl_seconds` at handshake; if
+    // a session goes idle long enough that the next request is past TTL, the
+    // session is rotated through the handshake path anyway, so skipping the
+    // intra-window touch can't strand a session before its real expiration.
+    let needs_touch = {
+        let debounce_ms = options.session_touch_debounce_seconds.saturating_mul(1000);
+        let now_ms = current_time_ms_for_touch();
+        now_ms.saturating_sub(session.last_update) >= debounce_ms
+    };
+    if needs_touch {
+        let mut updated_session = session.clone();
+        updated_session.touch();
+        session_storage.update_session(&updated_session).await?;
+    }
 
     // Build session info for response signing.
     // peer_nonce = the client's HANDSHAKE nonce (from session), not the per-message random nonce.

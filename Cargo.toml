@@ -12,8 +12,8 @@ categories = ["web-programming", "authentication", "cryptography"]
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-# Cloudflare Workers
-worker = "0.8"
+# Cloudflare Workers — `d1` feature enables D1Database for D1SessionStorage.
+worker = { version = "0.8", features = ["d1"] }
 
 # BSV SDK
 bsv-sdk = { package = "bsv-rs", version = "0.3", features = ["auth", "wallet", "transaction", "wasm"] }
