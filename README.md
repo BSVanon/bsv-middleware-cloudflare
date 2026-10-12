@@ -182,7 +182,7 @@ proves, before any wallet call, that the payment *pays this server correctly* an
 (`VerifiedPayment { satoshis, txid }`), so a host records the payment without parsing the BEEF a second time.
 
 **A BEEF of any size.** A valid payment is never refused for its size or its counts (the owner's ruling of
-2026-10-09): the payment is read once through the streaming reader of bsv-rs 0.4 (0.4.1 at least), one element in
+2026-10-09): the payment is read once through the streaming reader of bsv-rs 0.4 (0.4.5 at least), one element in
 hand, and a refusal of the bytes names the offset and the reader's kind. This crate carries no limit, no count bound
 and no 413.
 

@@ -19,7 +19,7 @@
 //!
 //! ## A payment of any size (0.5.0)
 //!
-//! The payment is read ONCE through the streaming reader of bsv-rs 0.4 (0.4.1 at least)
+//! The payment is read ONCE through the streaming reader of bsv-rs 0.4 (0.4.5 at least)
 //! (`transaction::verify_stream`), the scripts run: every unproven
 //! transaction's inputs are executed against the parent outputs the BEEF
 //! carries, and an Atomic subject is held to its rule. A valid payment is

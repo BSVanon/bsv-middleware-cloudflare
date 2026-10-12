@@ -69,7 +69,7 @@ pub enum PaymentVerdict {
 #[non_exhaustive]
 pub enum UnverifiableReason {
     /// The BEEF's bytes are invalid: the stream offset of the byte and one
-    /// of the streaming reader's kinds (bsv-rs 0.4.1 or later,
+    /// of the streaming reader's kinds (bsv-rs 0.4.5 or later,
     /// `transaction::beef_stream::Kind`, as its name; `NoInputs`, since
     /// 0.4.1, for a raw transaction with no input, at its leading byte). The
     /// reading stopped there. The payer's side.
