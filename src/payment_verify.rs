@@ -555,8 +555,18 @@ fn mining_header(value: serde_json::Value) -> Result<MiningHeader, ServiceError>
 async fn fetch_mining_tip(
     base: &str,
 ) -> Result<Option<bsv_middleware_core::ChainTip>, ServiceError> {
-    let tip = mining_header(fetch_chaintracks(base, "findChainTipHeaderHex").await?)?;
-    let network = fetch_chaintracks(base, "getChain").await?;
+    mining_tip_from(|route| async move { fetch_chaintracks(base, &route).await }).await
+}
+
+async fn mining_tip_from<F, Fut>(
+    fetch: F,
+) -> Result<Option<bsv_middleware_core::ChainTip>, ServiceError>
+where
+    F: Fn(String) -> Fut,
+    Fut: std::future::Future<Output = Result<serde_json::Value, ServiceError>>,
+{
+    let tip = mining_header(fetch("findChainTipHeaderHex".into()).await?)?;
+    let network = fetch("getChain".into()).await?;
     let (genesis_height, csv_height) = network_heights(
         network
             .as_str()
@@ -573,9 +583,8 @@ async fn fetch_mining_tip(
         if parent.len() != 64 || !parent.bytes().all(|b| b.is_ascii_hexdigit()) {
             return Err(ServiceError::new("invalid parent hash"));
         }
-        let header = mining_header(
-            fetch_chaintracks(base, &format!("findHeaderHexForBlockHash?hash={parent}")).await?,
-        )?;
+        let header =
+            mining_header(fetch(format!("findHeaderHexForBlockHash?hash={parent}")).await?)?;
         if header.height != height - 1 || !header.hash.eq_ignore_ascii_case(&parent) {
             return Err(ServiceError::new("inconsistent tip ancestry"));
         }
@@ -2105,5 +2114,31 @@ mod tests {
         assert_eq!(network_heights("main").unwrap(), (620538, 419328));
         assert_eq!(network_heights("test").unwrap(), (1344302, 770112));
         assert!(network_heights("unknown").is_err());
+    }
+}
+
+#[cfg(test)]
+mod mining_call_tests {
+    use super::*;
+    #[tokio::test]
+    async fn tip_ancestry_fetched_once_per_distinct_header() {
+        let calls = std::cell::RefCell::new(std::collections::HashMap::<String, usize>::new());
+        let tip = mining_tip_from(|route| {
+            *calls.borrow_mut().entry(route.clone()).or_default() += 1;
+            async move {
+                if route == "getChain" { return Ok(serde_json::json!("main")); }
+                let height = if route == "findChainTipHeaderHex" { 800_100 } else {
+                    u32::from_str_radix(route.split("hash=").nth(1).unwrap(), 16).unwrap()
+                };
+                Ok(serde_json::json!({"height": height, "time": height + 900_000_000,
+                    "hash": format!("{height:064x}"), "previousHash": format!("{:064x}", height - 1)}))
+            }
+        }).await.unwrap().unwrap();
+        assert_eq!(tip.median_time_past, 900_800_095);
+        let calls = calls.borrow();
+        assert_eq!(calls.len(), 12);
+        assert!(calls.values().all(|count| *count == 1));
+        assert_eq!(calls["findChainTipHeaderHex"], 1);
+        println!("mining context GETs: tip=1, network=1, distinct parent headers=10 (each once)");
     }
 }

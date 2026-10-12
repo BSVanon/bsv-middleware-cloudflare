@@ -183,7 +183,7 @@ impl UnverifiableReason {
 impl fmt::Display for UnverifiableReason {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::MiningContextUnavailable { offset, txid, input, check } => write!(f, "mining context unavailable for {check}: transaction {txid} at offset {offset}, input {input:?}; the host must supply a tip"),
+            Self::MiningContextUnavailable { offset, txid, input, check } => write!(f, "mining context unavailable for {check}: transaction {txid} at offset {offset}, input {input:?}; the host's header service must supply a mining tip"),
             Self::InvalidBeef {
                 offset,
                 kind,

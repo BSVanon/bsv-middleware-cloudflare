@@ -47,10 +47,16 @@ impl PaymentPart {
     pub fn suffix(&self) -> &str {
         &self.suffix
     }
+    /// Borrow the transaction's base64 bytes exactly as received in the payment
+    /// JSON. Decode these BEEF bytes for internalization after verification.
+    /// This slice borrows the original authenticated body without copying.
+    pub fn encoded_transaction(&self) -> &[u8] {
+        &self.bytes[self.transaction_span.clone()]
+    }
     /// Decode bounded chunks directly into the reader, never a whole decoded BEEF.
     pub fn transaction(&self) -> PaymentTransaction<'_> {
         PaymentTransaction {
-            encoded: &self.bytes[self.transaction_span.clone()],
+            encoded: self.encoded_transaction(),
         }
     }
 }
@@ -681,6 +687,11 @@ mod tests {
                 "the original body moves without cloning"
             );
             assert_eq!((part.prefix(), part.suffix()), ("p", "s"));
+            assert_eq!(part.encoded_transaction(), encoded.as_bytes());
+            assert_eq!(
+                part.encoded_transaction().as_ptr(),
+                part.bytes[part.transaction_span.clone()].as_ptr()
+            );
             let mut source = part.transaction();
             let mut decoded = Vec::new();
             while let Some(chunk) = source.next_chunk().await.unwrap() {

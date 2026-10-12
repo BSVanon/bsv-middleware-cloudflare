@@ -167,6 +167,10 @@ fn serialize(
 /// transactions, each spending all `k` outputs of the one before (FORKID
 /// signatures, the wallet's), the last paying output 0 to the derived script.
 fn honest(k: usize, hops: usize) -> Payment {
+    honest_with_lock(k, hops, 0)
+}
+
+fn honest_with_lock(k: usize, hops: usize, locktime: u32) -> Payment {
     const REQUIRED: u64 = 1000;
     let (server_key, sender, prefix, suffix, derived) = derivation();
     let key = PrivateKey::from_hex(&format!("{:064x}", 7)).unwrap();
@@ -203,7 +207,7 @@ fn honest(k: usize, hops: usize) -> Payment {
                 txid: prev_txid,
                 output_index: i as u32,
                 script: vec![],
-                sequence: u32::MAX,
+                sequence: if locktime == 0 { u32::MAX } else { 0xfffffffe },
             })
             .collect();
         let outputs: Vec<TxOutput> = if last {
@@ -225,7 +229,12 @@ fn honest(k: usize, hops: usize) -> Payment {
                 })
                 .collect()
         };
-        let cache = Arc::new(TxSighashCache::new(2, inputs.clone(), outputs.clone(), 0));
+        let cache = Arc::new(TxSighashCache::new(
+            2,
+            inputs.clone(),
+            outputs.clone(),
+            locktime,
+        ));
         let unlocks: Vec<Vec<u8>> = (0..inputs.len())
             .map(|i| {
                 let digest =
@@ -237,7 +246,7 @@ fn honest(k: usize, hops: usize) -> Payment {
                 u.to_binary()
             })
             .collect();
-        let raw = serialize(2, &inputs, &unlocks, &outputs, 0);
+        let raw = serialize(2, &inputs, &unlocks, &outputs, locktime);
         prev_txid = sha256d(&raw);
         prev_outputs = outputs;
         unproven.push(raw);
@@ -687,4 +696,61 @@ async fn mining_refusals_reach_the_correct_class() {
         .write_bytes(&subject);
     p.beef = w.into_bytes();
     refusal(&p, tip, "InputValueOutOfRange", false).await;
+}
+
+#[tokio::test]
+async fn twelve_ancestors_tip_call_counts() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    struct Counting<'a> {
+        inner: TipService<'a>,
+        calls: AtomicUsize,
+    }
+    impl bsv_middleware_core::HeaderService for Counting<'_> {
+        async fn merkle_root(
+            &self,
+            height: u32,
+        ) -> Result<Option<MerkleRoot>, bsv_middleware_core::ServiceError> {
+            bsv_middleware_core::HeaderService::merkle_root(&self.inner, height).await
+        }
+        async fn mining_tip(
+            &self,
+        ) -> Result<Option<bsv_middleware_core::ChainTip>, bsv_middleware_core::ServiceError>
+        {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(self.inner.tip)
+        }
+    }
+    for locktime in [0, 800_000] {
+        let p = honest_with_lock(1, 12, locktime);
+        let service = Counting {
+            inner: TipService {
+                payment: &p,
+                tip: Some(bsv_middleware_core::ChainTip {
+                    height: 800_100,
+                    median_time_past: 1_700_000_000,
+                    genesis_height: 620_538,
+                    csv_height: 419_328,
+                    next_block_time: None,
+                }),
+            },
+            calls: AtomicUsize::new(0),
+        };
+        assert!(verify_brc29_payment_verified(
+            &p.server_key,
+            &p.sender,
+            &p.prefix,
+            &p.suffix,
+            &p.beef,
+            p.output_index,
+            p.required,
+            Some(&service),
+            None
+        )
+        .await
+        .unwrap()
+        .is_ok());
+        let calls = service.calls.load(Ordering::SeqCst);
+        println!("12 unproven ancestors, locktime={locktime}: tip fetches={calls}");
+        assert_eq!(calls, usize::from(locktime != 0));
+    }
 }

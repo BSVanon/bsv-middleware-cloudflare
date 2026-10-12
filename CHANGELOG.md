@@ -5,6 +5,10 @@ patch versions are additive unless a line below says otherwise.
 
 ## Adapter 0.6.0 and core 0.3.0 - 2026-10-12
 
+- Fetch the mining tip and its parent headers once per verification, only when finality or coinbase maturity needs them.
+- Add `PaymentPart::encoded_transaction()` to borrow the received base64 BEEF bytes for internalization.
+- Declare Rust 1.87 as the minimum supported Rust version in both crates.
+
 The SDK floor in both crates is `bsv-rs = "0.5.0"` (caret). Core 0.3.0's
 primary check is `verify_brc29_payment_stream` over `AsyncByteSource`, with
 `work_limit: Option<u64>`; the two existing full slice functions are wrappers

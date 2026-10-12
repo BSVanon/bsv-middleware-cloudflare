@@ -372,6 +372,7 @@ struct Tap<'p> {
     /// A BUMP claims a height no header service can be asked for.
     beyond_headers: Option<Refusal>,
     needs_context: bool,
+    coinbases: std::collections::HashSet<Hash32>,
 }
 
 impl<'p> Tap<'p> {
@@ -387,6 +388,7 @@ impl<'p> Tap<'p> {
             unanchored: None,
             beyond_headers: None,
             needs_context: false,
+            coinbases: std::collections::HashSet::new(),
         }
     }
 
@@ -426,7 +428,17 @@ impl<'p> Tap<'p> {
                 body,
                 ..
             } => {
-                self.needs_context |= bump_index.is_none();
+                if bump_index.is_some()
+                    && body.inputs.len() == 1
+                    && body.inputs[0].prev == [0; 32]
+                    && body.inputs[0].vout == u32::MAX
+                {
+                    self.coinbases.insert(*txid);
+                }
+                self.needs_context |= bump_index.is_none()
+                    && ((body.lock_time != 0
+                        && body.inputs.iter().any(|i| i.sequence != u32::MAX))
+                        || body.inputs.iter().any(|i| self.coinbases.contains(&i.prev)));
                 if bump_index.is_none() && body.inputs.is_empty() && self.unanchored.is_none() {
                     self.unanchored = Some(*txid);
                 }
@@ -588,7 +600,8 @@ impl<S: AsyncByteSource, H: HeaderService + ?Sized> AsyncByteSource for TeeSourc
             self.tap.feed(bytes);
         }
         // The tap and reader cut the same elements. Acquire context once, only
-        // when an unproven transaction is ready to be folded by the reader.
+        // when finality or a coinbase spend needs it. The cached tip includes
+        // its median-time-past ancestry, so no parent is fetched again.
         if self.tap.needs_context && !self.tip_read {
             let tip = self.service.mining_tip().await.unwrap_or(None);
             *self.context.0.lock().expect("mining context lock") = tip;
