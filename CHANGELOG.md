@@ -3,7 +3,26 @@
 All notable changes to `bsv-middleware-cloudflare`. Versions below 1.0 may change public API between minor versions;
 patch versions are additive unless a line below says otherwise.
 
-## 0.5.1 — 2026-10-10
+## Adapter 0.5.2 and core 0.2.2 - 2026-10-12
+
+The floor is `bsv-rs = "0.4.5"` (caret); no API change in either crate.
+For every host that re-pins, including LOW's tower, the relay's door, Zanaadu's door and wallet-infra:
+a payer whose script declines under a work or memory bound is answered as payer-side
+`Unverifiable` with `SpendRefused`, naming the decline and input. In the adapter this is
+400 `ERR_PAYMENT_INVALID` by name, never a server-side reason or 500. The crates set no
+bound themselves: `work_limit` stays `None`, with no size or count limit.
+
+The SDK's `MerklePath` now refuses a lone hashed leaf at a nonzero offset (`MissingSibling`).
+The payment reader preserves this as a payer-side `InvalidBeef` refusal naming the offset;
+the payer must obtain a valid proof, without rewriting its offset.
+
+Hosts using SDK literals directly must add `work_limit: None` to `SpendParams` and
+`TxSpendParams`, and `work_spent: None` to memory `ScriptResourceLimit` literals. Resource
+byte fields are `u64`. Handle `ScriptResource::Work` and `SpendRefusal::Resource` as local
+declines before interpreting validity. These crates had no such literals to migrate.
+Choosing a payment-path work budget remains the owner's decision.
+
+## 0.5.1 - 2026-10-10
 
 bsv-rs 0.4.1 is the floor (the core is `bsv-middleware-core` 0.2.1, on the same floor). A raw transaction with no
 input is invalid bytes to the streaming reader (bsv-stack-lean #58, #59; the rule is the node's, cited by bsv-rs):
@@ -36,7 +55,7 @@ pass unchanged (the owner's bytes, sha256 `836579ad…`).
   entry, so a valid BEEF that pays carries a BUMP); the core witnesses its own rule on the tap directly
   (`the_doors_no_proof_stands_beneath_the_reader`).
 
-## 0.5.0 — 2026-10-09
+## 0.5.0 - 2026-10-09
 
 The payment door reads a BEEF of any size, and the scripts run. The core is `bsv-middleware-core` 0.2.0; the SDK is
 bsv-rs 0.4. The posture, as a rule (the owner's ruling of 2026-10-09; the stack review repository's charter "a BEEF
@@ -127,7 +146,7 @@ every 0.3 function keeps its name, path and signature, and the fleet's call site
 - Next: 0.6.0 streams the request body through `verify_stream_async` (`AsyncByteSource`), so the body is never held
   whole.
 
-## 0.4.1 — 2026-10-08
+## 0.4.1 - 2026-10-08
 
 ### Changed
 
@@ -161,7 +180,7 @@ every 0.3 function keeps its name, path and signature, and the fleet's call site
   nothing consumed or served, a storage fault pinned as the `Err` it was.
 - The core (`bsv-middleware-core`) is unchanged, 0.1.0.
 
-## 0.4.0 — 2026-10-08
+## 0.4.0 - 2026-10-08
 
 The core extract. The rules moved to a new runtime-free crate, `bsv-middleware-core` 0.1.0 (this repository,
 `core/`); this crate is now the Cloudflare Workers adapter over it. Carries everything in 0.3.7, 0.3.8 and 0.3.9.
@@ -296,7 +315,7 @@ Against 0.3.9 (the last release on the 0.3 line), three behaviours differ and ar
 
 - `hmac` and `ripemd` (they moved with the lane and the signer; `sha2` stays for the Durable Object cell).
 
-## 0.3.9 — 2026-10-08 (0.3 line, branch `release-0.3`, tag `v0.3.9`)
+## 0.3.9 - 2026-10-08 (0.3 line, branch `release-0.3`, tag `v0.3.9`)
 
 - Fails closed on a header-service lookup error: `verify_brc29_payment` (and the `_with_header_lookup` form) return
   `Err(PaymentVerifyError::Unverifiable { height, reason })` instead of accepting with a warning; the middleware's own
@@ -304,7 +323,7 @@ Against 0.3.9 (the last release on the 0.3 line), three behaviours differ and ar
   called). The owner's ruling of 2026-10-08. The conformance file's `spv-lookup-error` case expects `Unverifiable`.
 - No other change: 0.3.8's 402-with-a-fresh-challenge on Underpaid / WrongScript stays on this line.
 
-## 0.3.8 — 2026-10-08
+## 0.3.8 - 2026-10-08
 
 ### Fixed
 
@@ -328,7 +347,7 @@ Against 0.3.9 (the last release on the 0.3 line), three behaviours differ and ar
 - Exact-price payers to the key derived from the same `server_private_key` see no change. A deployment whose payment
   key differs from the key its clients derive for will now be refused instead of recording outputs it cannot spend.
 
-## 0.3.7 — 2026-10-08
+## 0.3.7 - 2026-10-08
 
 ### Added
 
@@ -340,7 +359,7 @@ Against 0.3.9 (the last release on the 0.3 line), three behaviours differ and ar
   verification vectors (amount, script, first-output rule, pay-yourself, header-service gate, SPV), produced and run
   by `tests/conformance_brc29.rs`. A second implementation runs the same file. No behaviour or signature changes.
 
-## 0.3.6 — 2026-10-08
+## 0.3.6 - 2026-10-08
 
 ### Added
 
@@ -370,7 +389,7 @@ Against 0.3.9 (the last release on the 0.3 line), three behaviours differ and ar
 - The configuration gate and the per-root SPV decision are pure functions with table tests (match, mismatch, lookup
   error, and every refused `header_url` shape); the header lookup is injected into the loop that runs them.
 
-## 0.3.5 — 2026-09-20
+## 0.3.5 - 2026-09-20
 
 Session-lane hardening; no new API.
 
@@ -378,7 +397,7 @@ Session-lane hardening; no new API.
   `MAX_SAFE_COUNTER` (2^53 − 1) is refused by name instead of faulting the store.
 - Every 64-bit field of the session cell and its body types documents its bound.
 
-## 0.3.4 — 2026-09-14
+## 0.3.4 - 2026-09-14
 
 - **Session lane (opt-in).** One BRC-103/104 handshake per origin, then MAC'd calls with no wallet calls and one
   Durable Object round trip: `process_auth_lane`, `LaneAuthResult`, `seal_lane_response` / `seal_lane_response_text`,
@@ -388,7 +407,7 @@ Session-lane hardening; no new API.
   as the signed-read mint.
 - `sha2` is a plain dependency (the lane MACs); `ripemd` stays behind `refund`.
 
-## 0.3.3 — 2026-09-09
+## 0.3.3 - 2026-09-09
 
 - **Durable Object session backend (opt-in).** `process_auth_do`, `AuthSessionStore`, `DoSessionStorage`: one object
   per session nonce holds the session record and the consumed per-request nonces (an atomic put-if-absent, no KV

@@ -19,7 +19,7 @@
 //!
 //! ## A payment of any size (0.5.0)
 //!
-//! The payment is read ONCE through the streaming reader of bsv-rs 0.4 (0.4.1 at least)
+//! The payment is read ONCE through the streaming reader of bsv-rs 0.4 (0.4.5 at least)
 //! (`transaction::verify_stream`), the scripts run: every unproven
 //! transaction's inputs are executed against the parent outputs the BEEF
 //! carries, and an Atomic subject is held to its rule. A valid payment is
@@ -1515,6 +1515,29 @@ mod tests {
             "https://",
         ] {
             assert_eq!(header_service_host(url), None, "{url:?}");
+        }
+    }
+
+    #[test]
+    fn test_resource_decline_stays_payer_side_in_the_adapter() {
+        for bound in ["work", "memory"] {
+            let error = accept_verdict(PaymentVerdict::Unverifiable {
+                reason: UnverifiableReason::SpendRefused {
+                    offset: 42,
+                    txid: "ab".into(),
+                    input: Some(3),
+                    why: format!("script declined under a {bound} resource bound"),
+                },
+            })
+            .unwrap_err();
+            assert!(matches!(error, PaymentVerifyError::Unverifiable { .. }));
+            assert!(!error.is_server_side());
+            let text = error.to_string();
+            assert!(
+                text.contains("input 3") && text.contains(bound) && text.contains("declined"),
+                "{text}"
+            );
+            assert!(!text.contains("retry the same payment"), "{text}");
         }
     }
 

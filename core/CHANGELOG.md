@@ -3,7 +3,26 @@
 All notable changes to `bsv-middleware-core`. Versions below 1.0 may change public API between minor versions;
 patch versions are additive unless a line below says otherwise.
 
-## 0.2.1 — 2026-10-10
+## 0.2.2 - 2026-10-12
+
+The floor is `bsv-rs = "0.4.5"` (caret); no API change in either crate.
+For every host that re-pins, including LOW's tower, the relay's door, Zanaadu's door and wallet-infra:
+a payer whose script declines under a work or memory bound is answered as payer-side
+`Unverifiable` with `SpendRefused`, naming the decline and input. In the adapter this is
+400 `ERR_PAYMENT_INVALID` by name, never a server-side reason or 500. The crates set no
+bound themselves: `work_limit` stays `None`, with no size or count limit.
+
+The SDK's `MerklePath` now refuses a lone hashed leaf at a nonzero offset (`MissingSibling`).
+The payment reader preserves this as a payer-side `InvalidBeef` refusal naming the offset;
+the payer must obtain a valid proof, without rewriting its offset.
+
+Hosts using SDK literals directly must add `work_limit: None` to `SpendParams` and
+`TxSpendParams`, and `work_spent: None` to memory `ScriptResourceLimit` literals. Resource
+byte fields are `u64`. Handle `ScriptResource::Work` and `SpendRefusal::Resource` as local
+declines before interpreting validity. These crates had no such literals to migrate.
+Choosing a payment-path work budget remains the owner's decision.
+
+## 0.2.1 - 2026-10-10
 
 bsv-rs 0.4.1 is the floor. A raw transaction with no input is invalid bytes to the streaming reader (bsv-stack-lean
 #58, #59; the rule is the node's, cited by bsv-rs): `verify_stream`, `verify_stream_structure` and
@@ -39,7 +58,7 @@ The 22 conformance vectors pass unchanged.
   the tee is `NoProof` naming the subject. Both shapes are the reader's refusals at 0.4.1 (`NoInputs`,
   `InputNamesNoElement`), so the word is unreachable through it: kept as defense in depth.
 
-## 0.2.0 — 2026-10-09
+## 0.2.0 - 2026-10-09
 
 The payment door reads a BEEF of any size, and the scripts run. The posture, as a rule (the owner's ruling of
 2026-10-09; the stack review repository's charter "a BEEF of any size"): a valid BEEF is never refused for its size
@@ -128,7 +147,7 @@ Breaking: the verdict's shape and the SDK major.
 - Next: 0.3.0 reads the payment from a byte source (`verify_stream_async` over an `AsyncByteSource`), so a host
   streams a request body through the same checks without holding it whole.
 
-## 0.1.0 — 2026-10-08
+## 0.1.0 - 2026-10-08
 
 The first release: the runtime-free rules extracted from `bsv-middleware-cloudflare` 0.3.8, which becomes a
 Workers adapter over this crate in its 0.4.0.
