@@ -41,10 +41,20 @@ for path in filter(None, paths):
         pass  # Deleted paths are still scanned in the diff below.
 base = sys.argv[1]
 subprocess.run(['git', 'rev-parse', '--verify', base], check=True, stdout=subprocess.DEVNULL)
-# Include removed lines and every branch commit, plus staged and unstaged edits.
+# Scan added patch lines in every commit, including additions later removed.
+commits = subprocess.check_output(['git', 'rev-list', f'{base}..HEAD']).decode().splitlines()
+for commit in commits:
+    patch = subprocess.check_output([
+        'git', 'show', '--format=', '-p', '--no-ext-diff', '--no-textconv',
+        '--unified=0', commit,
+    ])
+    added = b'\n'.join(line for line in patch.splitlines()
+                       if line.startswith(b'+') and not line.startswith(b'+++'))
+    scan(f'commit {commit} added patch', added)
+# Include removed lines in the net diff, plus staged and unstaged edits.
 scan('branch diff', subprocess.check_output(['git', 'diff', '--no-ext-diff', '--no-textconv', '--unified=0', f'{base}...HEAD']))
 scan('working diff', subprocess.check_output(['git', 'diff', '--no-ext-diff', '--no-textconv', '--unified=0', 'HEAD']))
 if failed:
     sys.exit(1)
-print('secrets scan: tracked tree and diff clean')
+print('secrets scan: tracked tree, commit patches and diff clean')
 PY

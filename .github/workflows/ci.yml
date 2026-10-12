@@ -3,8 +3,8 @@ name: ci
 # The machine gate for the two crates of this repository: `core/` is
 # bsv-middleware-core (runtime-free) and the root is bsv-middleware-cloudflare
 # (the Workers adapter). The job ids below are the status-check contexts
-# branch protection on main requires (test, fmt, clippy, wasm32, vectors,
-# package); renaming a job removes its context and blocks every PR until the
+# branch protection on main requires (eight: test, fmt, clippy, wasm32,
+# vectors, package, deny, secrets); renaming a job removes its context and blocks every PR until the
 # protection is updated. Modelled on Calhooon/bsv-middleware-rs's ci.yml.
 on:
   pull_request:
@@ -206,7 +206,14 @@ jobs:
       - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # v1
         with:
           toolchain: stable
+      - name: Cache cargo-deny
+        id: cargo-deny-cache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/.cargo/bin/cargo-deny
+          key: ${{ runner.os }}-${{ runner.arch }}-cargo-deny-0.19.0
       - name: Install cargo-deny
+        if: steps.cargo-deny-cache.outputs.cache-hit != 'true'
         run: cargo install cargo-deny --locked --version 0.19.0
       - name: Check both crates
         run: |
@@ -219,7 +226,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 0
-      - name: Scan the tracked tree and diff
+      - name: Scan the tracked tree, commit patches and diff
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
         run: |
