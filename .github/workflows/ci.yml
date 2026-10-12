@@ -198,3 +198,33 @@ jobs:
         # Cargo stages the unpublished core in a temporary local registry for
         # the adapter's package verification. Nothing is uploaded by dry-run.
         run: cargo publish --dry-run --workspace
+
+  deny:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # v1
+        with:
+          toolchain: stable
+      - name: Install cargo-deny
+        run: cargo install cargo-deny --locked --version 0.19.0
+      - name: Check both crates
+        run: |
+          cargo deny --manifest-path core/Cargo.toml check
+          cargo deny --manifest-path Cargo.toml check
+
+  secrets:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
+      - name: Scan the tracked tree and diff
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          base="${BASE_SHA:-}"
+          if [ -z "$base" ] || ! git cat-file -e "$base^{commit}" 2>/dev/null; then
+            base=$(git rev-list --max-parents=0 HEAD | head -1)
+          fi
+          tools/ci/secrets_scan.sh "$base"

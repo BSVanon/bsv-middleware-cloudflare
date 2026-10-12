@@ -288,26 +288,11 @@ pub fn build_request_payload(
 /// - value < 0x100000000: 0xFE + 4 bytes LE
 /// - else: 0xFF + 8 bytes LE
 pub fn write_varint(value: i64) -> Vec<u8> {
-    if value < 0 {
-        // -1 means "empty/missing" - write as 0xFF followed by 8 bytes of 0xFF
-        vec![0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF]
-    } else if value < 253 {
-        vec![value as u8]
-    } else if value < 0x10000 {
-        let v = value as u16;
-        let bytes = v.to_le_bytes();
-        vec![0xFD, bytes[0], bytes[1]]
-    } else if value < 0x100000000 {
-        let v = value as u32;
-        let bytes = v.to_le_bytes();
-        vec![0xFE, bytes[0], bytes[1], bytes[2], bytes[3]]
-    } else {
-        let v = value as u64;
-        let bytes = v.to_le_bytes();
-        vec![
-            0xFF, bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
-        ]
-    }
+    // Preserve the TS missing-value sentinel for every negative input.
+    let value = if value < 0 { u64::MAX } else { value as u64 };
+    let mut writer = bsv_sdk::primitives::encoding::Writer::new();
+    writer.write_var_int(value);
+    writer.into_bytes()
 }
 
 /// SHA-256 of the exact BRC-104 request payload without copying the body.

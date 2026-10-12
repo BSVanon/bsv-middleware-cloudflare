@@ -1,6 +1,6 @@
 [package]
 name = "bsv-middleware-core"
-version = "0.3.0"
+version = "0.3.1"
 edition = "2021"
 rust-version = "1.87"
 description = "Runtime-free BSV BRC-103/104 authentication and BRC-29 payment verification: the pure rules behind bsv-middleware-cloudflare"
@@ -27,15 +27,14 @@ hex = "0.4"
 # Entropy for per-message nonces (the OS source; `js` is the host's choice on wasm32).
 getrandom = "0.2"
 
-# The session lane's MAC and digests; `ripemd` only for the refund signer's hash160.
+# The session lane's MAC and digests.
 sha2 = "0.10"
 hmac = "0.12"
-ripemd = { version = "0.1", optional = true }
 
 [features]
 default = []
 # `refund`: the BRC-29 refund signer (`refund::signer`) and refund key derivation.
-refund = ["ripemd"]
+refund = []
 
 [package.metadata.docs.rs]
 all-features = true

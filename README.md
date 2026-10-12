@@ -320,7 +320,7 @@ after `verify_brc29_payment` succeeds and before internalizing; `release_payment
 pre-internalize failure.
 
 ```toml
-bsv-middleware-cloudflare = { version = "0.6.0", features = ["d1-claims"] }
+bsv-middleware-cloudflare = { version = "0.6.1", features = ["d1-claims"] }
 ```
 
 ## Session storage backends
@@ -343,3 +343,11 @@ and export the class from the worker crate: `pub use bsv_middleware_cloudflare::
 ## Releases
 
 Tags `core-v*` and `v*` publish `bsv-middleware-core` and `bsv-middleware-cloudflare` through crates.io trusted publishing (`.github/workflows/release.yml`); the trusted-publishing entries exist on crates.io for both crates (verified 2026-10-10: both tag shapes authenticate). Releases go out by the tags, `core-v*` first, then `v*` once the core version is on crates.io (the adapter's package step resolves the core from crates.io alone).
+
+## Lint
+
+Run `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --all-features -- -D warnings`, and `cargo clippy -p bsv-middleware-cloudflare --target wasm32-unknown-unknown --all-features -- -D warnings`.
+Build docs with `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps`.
+Install `cargo-deny` with `cargo install cargo-deny --locked --version 0.19.0`, then run `cargo deny --manifest-path core/Cargo.toml check` and `cargo deny --manifest-path Cargo.toml check`.
+`tools/ci/secrets_scan.sh origin/main` scans tracked files and the branch and working diffs for the estate's secret shapes, reporting paths only. Public test keys require a reviewed digest exception only if a shape matches; none are currently excluded.
+The six existing CI contexts stay required. After merge, the captain adds `deny` and `secrets` to main's required contexts.

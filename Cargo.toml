@@ -1,6 +1,6 @@
 [package]
 name = "bsv-middleware-cloudflare"
-version = "0.6.0"
+version = "0.6.1"
 edition = "2021"
 rust-version = "1.87"
 description = "BSV BRC-103/104 authentication and BRC-29 payment middleware for Cloudflare Workers"
@@ -18,7 +18,7 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 # The runtime-free rules this crate adapts to Workers (same repository, `core/`).
-bsv-middleware-core = { version = "0.3.0", path = "core" }
+bsv-middleware-core = { version = "0.3.1", path = "core" }
 
 # Cloudflare Workers
 worker = "0.8"

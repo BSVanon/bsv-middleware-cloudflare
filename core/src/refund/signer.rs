@@ -15,6 +15,9 @@
 //! path uses the matching `derive_private_key(brc29, key_id, Self_)`. We do
 //! the same here to guarantee a round-trip pair — see the module tests.
 
+use bsv_sdk::primitives::encoding::{Reader, Writer};
+pub use bsv_sdk::primitives::hash::hash160;
+use bsv_sdk::primitives::hash::sha256d;
 use bsv_sdk::wallet::{Counterparty, KeyDeriverApi, ProtoWallet, Protocol, SecurityLevel};
 
 /// Sign a transaction template from the storage server's createAction response.
@@ -62,7 +65,7 @@ pub fn sign_create_action_template(
     raw_tx.extend_from_slice(&version.to_le_bytes());
 
     // Input count (varint)
-    write_varint(&mut raw_tx, inputs.len() as u64);
+    raw_tx.extend_from_slice(Writer::new().write_var_int(inputs.len() as u64).as_bytes());
 
     // Inputs (with empty unlocking scripts)
     for input in inputs {
@@ -89,14 +92,14 @@ pub fn sign_create_action_template(
         raw_tx.extend_from_slice(&source_vout.to_le_bytes());
 
         // Empty unlocking script (will be filled after signing)
-        write_varint(&mut raw_tx, 0);
+        raw_tx.extend_from_slice(Writer::new().write_var_int(0).as_bytes());
 
         // Sequence (4 bytes, 0xFFFFFFFF)
         raw_tx.extend_from_slice(&0xFFFFFFFFu32.to_le_bytes());
     }
 
     // Output count (varint)
-    write_varint(&mut raw_tx, outputs.len() as u64);
+    raw_tx.extend_from_slice(Writer::new().write_var_int(outputs.len() as u64).as_bytes());
 
     // Outputs
     for output in outputs {
@@ -146,7 +149,11 @@ pub fn sign_create_action_template(
         };
 
         // Script length (varint) + script bytes
-        write_varint(&mut raw_tx, locking_script.len() as u64);
+        raw_tx.extend_from_slice(
+            Writer::new()
+                .write_var_int(locking_script.len() as u64)
+                .as_bytes(),
+        );
         raw_tx.extend_from_slice(&locking_script);
     }
 
@@ -264,7 +271,7 @@ pub fn sign_create_action_template(
 
 /// Compute the txid from a raw transaction (double SHA256, reversed).
 pub fn compute_txid(raw_tx: &[u8]) -> String {
-    let hash = double_sha256(raw_tx);
+    let hash = sha256d(raw_tx);
     let mut reversed = hash;
     reversed.reverse();
     hex::encode(reversed)
@@ -290,23 +297,27 @@ fn compute_sighash(
         prevouts_data.extend_from_slice(&input.txid);
         prevouts_data.extend_from_slice(&input.vout.to_le_bytes());
     }
-    let hash_prevouts = double_sha256(&prevouts_data);
+    let hash_prevouts = sha256d(&prevouts_data);
 
     // hashSequence: double SHA256 of all sequences
     let mut sequence_data = Vec::new();
     for input in &inputs {
         sequence_data.extend_from_slice(&input.sequence.to_le_bytes());
     }
-    let hash_sequence = double_sha256(&sequence_data);
+    let hash_sequence = sha256d(&sequence_data);
 
     // hashOutputs: double SHA256 of all outputs
     let mut outputs_data = Vec::new();
     for output in &outputs {
         outputs_data.extend_from_slice(&output.satoshis.to_le_bytes());
-        write_varint(&mut outputs_data, output.script.len() as u64);
+        outputs_data.extend_from_slice(
+            Writer::new()
+                .write_var_int(output.script.len() as u64)
+                .as_bytes(),
+        );
         outputs_data.extend_from_slice(&output.script);
     }
-    let hash_outputs = double_sha256(&outputs_data);
+    let hash_outputs = sha256d(&outputs_data);
 
     // Build the preimage
     let mut preimage = Vec::new();
@@ -318,7 +329,11 @@ fn compute_sighash(
     preimage.extend_from_slice(&input.txid);
     preimage.extend_from_slice(&input.vout.to_le_bytes());
 
-    write_varint(&mut preimage, locking_script.len() as u64);
+    preimage.extend_from_slice(
+        Writer::new()
+            .write_var_int(locking_script.len() as u64)
+            .as_bytes(),
+    );
     preimage.extend_from_slice(locking_script);
 
     preimage.extend_from_slice(&satoshis.to_le_bytes());
@@ -329,7 +344,7 @@ fn compute_sighash(
     // sighash type: SIGHASH_ALL | SIGHASH_FORKID = 0x41
     preimage.extend_from_slice(&0x41u32.to_le_bytes());
 
-    Ok(double_sha256(&preimage))
+    Ok(sha256d(&preimage))
 }
 
 // =============================================================================
@@ -363,7 +378,11 @@ fn parse_transaction(tx_data: &[u8]) -> Result<(u32, Vec<TxInput>, Vec<TxOutput>
     ]);
     offset += 4;
 
-    let (input_count, bytes_read) = read_varint(&tx_data[offset..])?;
+    let (input_count, bytes_read) = {
+        let mut reader = Reader::new(&tx_data[offset..]);
+        let value = reader.read_var_int().map_err(|e| e.to_string())?;
+        (value, reader.position())
+    };
     offset += bytes_read;
 
     let mut inputs = Vec::with_capacity(input_count as usize);
@@ -383,7 +402,11 @@ fn parse_transaction(tx_data: &[u8]) -> Result<(u32, Vec<TxInput>, Vec<TxOutput>
         ]);
         offset += 4;
 
-        let (script_len, bytes_read) = read_varint(&tx_data[offset..])?;
+        let (script_len, bytes_read) = {
+            let mut reader = Reader::new(&tx_data[offset..]);
+            let value = reader.read_var_int().map_err(|e| e.to_string())?;
+            (value, reader.position())
+        };
         offset += bytes_read;
 
         if offset + script_len as usize > tx_data.len() {
@@ -411,7 +434,11 @@ fn parse_transaction(tx_data: &[u8]) -> Result<(u32, Vec<TxInput>, Vec<TxOutput>
         });
     }
 
-    let (output_count, bytes_read) = read_varint(&tx_data[offset..])?;
+    let (output_count, bytes_read) = {
+        let mut reader = Reader::new(&tx_data[offset..]);
+        let value = reader.read_var_int().map_err(|e| e.to_string())?;
+        (value, reader.position())
+    };
     offset += bytes_read;
 
     let mut outputs = Vec::with_capacity(output_count as usize);
@@ -431,7 +458,11 @@ fn parse_transaction(tx_data: &[u8]) -> Result<(u32, Vec<TxInput>, Vec<TxOutput>
         ]);
         offset += 8;
 
-        let (script_len, bytes_read) = read_varint(&tx_data[offset..])?;
+        let (script_len, bytes_read) = {
+            let mut reader = Reader::new(&tx_data[offset..]);
+            let value = reader.read_var_int().map_err(|e| e.to_string())?;
+            (value, reader.position())
+        };
         offset += bytes_read;
 
         if offset + script_len as usize > tx_data.len() {
@@ -488,7 +519,7 @@ fn insert_unlocking_script(
 
     let mut result = Vec::new();
     result.extend_from_slice(&version.to_le_bytes());
-    write_varint(&mut result, inputs.len() as u64);
+    result.extend_from_slice(Writer::new().write_var_int(inputs.len() as u64).as_bytes());
 
     for (i, input) in inputs.iter().enumerate() {
         result.extend_from_slice(&input.txid);
@@ -500,92 +531,24 @@ fn insert_unlocking_script(
             &input.script
         };
 
-        write_varint(&mut result, script.len() as u64);
+        result.extend_from_slice(Writer::new().write_var_int(script.len() as u64).as_bytes());
         result.extend_from_slice(script);
         result.extend_from_slice(&input.sequence.to_le_bytes());
     }
 
-    write_varint(&mut result, outputs.len() as u64);
+    result.extend_from_slice(Writer::new().write_var_int(outputs.len() as u64).as_bytes());
     for output in &outputs {
         result.extend_from_slice(&output.satoshis.to_le_bytes());
-        write_varint(&mut result, output.script.len() as u64);
+        result.extend_from_slice(
+            Writer::new()
+                .write_var_int(output.script.len() as u64)
+                .as_bytes(),
+        );
         result.extend_from_slice(&output.script);
     }
 
     result.extend_from_slice(&locktime.to_le_bytes());
     Ok(result)
-}
-
-// =============================================================================
-// Helpers
-// =============================================================================
-
-/// Write a Bitcoin-style varint.
-fn write_varint(output: &mut Vec<u8>, value: u64) {
-    if value < 0xfd {
-        output.push(value as u8);
-    } else if value <= 0xffff {
-        output.push(0xfd);
-        output.extend_from_slice(&(value as u16).to_le_bytes());
-    } else if value <= 0xffffffff {
-        output.push(0xfe);
-        output.extend_from_slice(&(value as u32).to_le_bytes());
-    } else {
-        output.push(0xff);
-        output.extend_from_slice(&value.to_le_bytes());
-    }
-}
-
-/// Read a Bitcoin-style varint and return (value, bytes_consumed).
-fn read_varint(data: &[u8]) -> Result<(u64, usize), String> {
-    if data.is_empty() {
-        return Err("Empty varint".to_string());
-    }
-    let first = data[0];
-    if first < 0xfd {
-        Ok((first as u64, 1))
-    } else if first == 0xfd {
-        if data.len() < 3 {
-            return Err("Truncated varint (2-byte)".to_string());
-        }
-        let val = u16::from_le_bytes([data[1], data[2]]) as u64;
-        Ok((val, 3))
-    } else if first == 0xfe {
-        if data.len() < 5 {
-            return Err("Truncated varint (4-byte)".to_string());
-        }
-        let val = u32::from_le_bytes([data[1], data[2], data[3], data[4]]) as u64;
-        Ok((val, 5))
-    } else {
-        if data.len() < 9 {
-            return Err("Truncated varint (8-byte)".to_string());
-        }
-        let val = u64::from_le_bytes([
-            data[1], data[2], data[3], data[4], data[5], data[6], data[7], data[8],
-        ]);
-        Ok((val, 9))
-    }
-}
-
-/// Double SHA256 hash.
-fn double_sha256(data: &[u8]) -> [u8; 32] {
-    use sha2::{Digest, Sha256};
-    let hash1 = Sha256::digest(data);
-    let hash2 = Sha256::digest(hash1);
-    let mut result = [0u8; 32];
-    result.copy_from_slice(&hash2);
-    result
-}
-
-/// HASH160: RIPEMD160(SHA256(data))
-pub fn hash160(data: &[u8]) -> [u8; 20] {
-    use sha2::{Digest, Sha256};
-    let sha256_hash = Sha256::digest(data);
-    use ripemd::Ripemd160;
-    let ripemd_hash = <Ripemd160 as ripemd::Digest>::digest(sha256_hash);
-    let mut result = [0u8; 20];
-    result.copy_from_slice(&ripemd_hash);
-    result
 }
 
 #[cfg(test)]
@@ -765,16 +728,20 @@ mod tests {
         let parent_satoshis: u64 = 100;
         let mut parent_tx = Vec::new();
         parent_tx.extend_from_slice(&1u32.to_le_bytes()); // version
-        write_varint(&mut parent_tx, 1); // 1 input
+        parent_tx.extend_from_slice(Writer::new().write_var_int(1).as_bytes()); // 1 input
         parent_tx.extend_from_slice(&[0u8; 32]); // coinbase txid
         parent_tx.extend_from_slice(&0xFFFFFFFFu32.to_le_bytes()); // vout
-        write_varint(&mut parent_tx, 1); // script len
+        parent_tx.extend_from_slice(Writer::new().write_var_int(1).as_bytes()); // script len
         parent_tx.push(0x00); // OP_0
         parent_tx.extend_from_slice(&0xFFFFFFFFu32.to_le_bytes()); // sequence
-        write_varint(&mut parent_tx, 1); // 1 output
+        parent_tx.extend_from_slice(Writer::new().write_var_int(1).as_bytes()); // 1 output
         parent_tx.extend_from_slice(&parent_satoshis.to_le_bytes());
         let ls_bytes = hex::decode(&locking_script_hex).unwrap();
-        write_varint(&mut parent_tx, ls_bytes.len() as u64);
+        parent_tx.extend_from_slice(
+            Writer::new()
+                .write_var_int(ls_bytes.len() as u64)
+                .as_bytes(),
+        );
         parent_tx.extend_from_slice(&ls_bytes);
         parent_tx.extend_from_slice(&0u32.to_le_bytes()); // locktime
         let parent_txid = compute_txid(&parent_tx);
@@ -859,16 +826,20 @@ mod tests {
         let parent_satoshis: u64 = 50;
         let mut parent_tx = Vec::new();
         parent_tx.extend_from_slice(&1u32.to_le_bytes());
-        write_varint(&mut parent_tx, 1);
+        parent_tx.extend_from_slice(Writer::new().write_var_int(1).as_bytes());
         parent_tx.extend_from_slice(&[0u8; 32]);
         parent_tx.extend_from_slice(&0xFFFFFFFFu32.to_le_bytes());
-        write_varint(&mut parent_tx, 1);
+        parent_tx.extend_from_slice(Writer::new().write_var_int(1).as_bytes());
         parent_tx.push(0x00);
         parent_tx.extend_from_slice(&0xFFFFFFFFu32.to_le_bytes());
-        write_varint(&mut parent_tx, 1);
+        parent_tx.extend_from_slice(Writer::new().write_var_int(1).as_bytes());
         parent_tx.extend_from_slice(&parent_satoshis.to_le_bytes());
         let ls_bytes = hex::decode(&locking_script_hex).unwrap();
-        write_varint(&mut parent_tx, ls_bytes.len() as u64);
+        parent_tx.extend_from_slice(
+            Writer::new()
+                .write_var_int(ls_bytes.len() as u64)
+                .as_bytes(),
+        );
         parent_tx.extend_from_slice(&ls_bytes);
         parent_tx.extend_from_slice(&0u32.to_le_bytes());
         let parent_txid = compute_txid(&parent_tx);

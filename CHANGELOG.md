@@ -3,6 +3,12 @@
 All notable changes to `bsv-middleware-cloudflare`. Versions below 1.0 may change public API between minor versions;
 patch versions are additive unless a line below says otherwise.
 
+## Adapter 0.6.1 and core 0.3.1 - 2026-10-12
+
+- Move refund hash and varint primitives and the BRC-104 varint writer onto public bsv-rs 0.5.0 APIs, preserving captured byte goldens and public compatibility exports. No hand-rolled base58 exists here.
+- Track the nine deferred header merkle_root sites for the slot after bsv-rs 0.6.0 publishes in [issue #8](https://github.com/Calhooon/bsv-middleware-cloudflare/issues/8).
+- Add deny.toml with RustSec, license and source policies, plus cargo-deny and secrets scan CI jobs.
+
 ## Adapter 0.6.0 and core 0.3.0 - 2026-10-12
 
 - Fetch the mining tip and its parent headers once per verification, only when finality or coinbase maturity needs them.
