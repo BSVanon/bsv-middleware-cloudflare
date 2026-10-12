@@ -86,7 +86,8 @@ pub enum UnverifiableReason {
     /// interpreter refused a spend of an unproven transaction: an input
     /// that does not unlock the parent output the BEEF carries, a parent
     /// output that is not there to spend, or a transaction worth more than
-    /// its inputs. The payer's side.
+    /// its inputs, or a local evaluator decline under a work or memory
+    /// resource bound (not a script validity judgment). The payer's side.
     SpendRefused {
         /// The offset of the input (or of the transaction, for the value
         /// rule).

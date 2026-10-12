@@ -4,6 +4,20 @@ The runtime-free rules of BSV BRC-103/104 authentication and BRC-29 payment veri
 compute and decide, with no transport, no store, no clock and no network of its own. A host crate adapts these
 rules to its runtime; `bsv-middleware-cloudflare` (0.4.0 and later) is the Cloudflare Workers host.
 
+## Install
+
+```toml
+bsv-middleware-core = "0.2.2"
+```
+
+The SDK floor is bsv-rs 0.4.5; no API change in the core or adapter 0.5.2.
+A script declining under a work or memory bound is payer-side `Unverifiable` with
+`SpendRefused`, naming the decline and input (400 `ERR_PAYMENT_INVALID` in the adapter).
+The crates set no bound themselves. The SDK's `MerklePath` refuses a lone hashed leaf
+at a nonzero offset; the payment refusal is payer-side and names the offset.
+LOW's tower, the relay's door, Zanaadu's door and wallet-infra should follow
+[the re-pin migration](CHANGELOG.md).
+
 ## What it decides
 
 **A payment check answers in six words, never a boolean:**
@@ -20,7 +34,7 @@ pub enum PaymentVerdict {
 ```
 
 **A BEEF of any size.** A valid payment is never refused for its size or its counts (the owner's ruling of
-2026-10-09): the payment is read once through the streaming reader of bsv-rs 0.4 (0.4.1 at least;
+2026-10-09): the payment is read once through the streaming reader of bsv-rs 0.4 (0.4.5 at least;
 `transaction::verify_stream`), one element in hand, the scripts run; a refusal of the bytes names the offset and the
 reader's kind. No bound lives here.
 

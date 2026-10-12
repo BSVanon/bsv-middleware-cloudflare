@@ -6,13 +6,13 @@ Port of [`auth-express-middleware`](https://github.com/bitcoin-sv/auth-express-m
 
 ## What it provides
 
-- **`process_auth`** / **`process_auth_with_storage`** — BRC-103/104 mutual identity handshake, session verification, certificate exchange, and per-request replay protection (each `x-bsv-auth-nonce` is single-use per session). Returns the authenticated identity key, a reusable session handle, and the raw request body. Every authentication refusal is a 401 response from the middleware itself (0.4.1), with CORS, unsigned; an `Err` is a fault (storage, the server's key, the transport).
-- **`process_payment_with_storage`** — BRC-29 payment verification. Emits `402 Payment Required` with derivation prefix, accepts `x-bsv-payment` header, reads output 0 of the payment and refuses it (`400 ERR_INVALID_PAYMENT`, the quote kept) unless it pays this server's BRC-29 derived key at least the price (0.3.8; 400 since 0.4.0), internalizes via a remote wallet storage endpoint, gates on the wallet's `accepted` flag, and enforces single-use derivation prefixes. `satoshis_paid` is the amount read from the output. (`process_payment` remains as a deprecated stateless variant.)
-- **`sign_json_response`** — signs outbound JSON responses so BRC-103/104 clients (e.g. `AuthFetch`) can verify server identity and message integrity. Equivalent to Express's `res.json` hijacking, but explicit.
-- **`WorkerStorageClient`** — WASM-compatible RPC client for a wallet storage server (e.g. `storage.babbage.systems`), used by `process_payment` and optional refund flows.
-- **Optional `refund` feature** — BRC-41 refund transaction builder for partial-refund scenarios (e.g. AI agents that pre-charge and refund on failure). Not present in the Express reference.
-- **`verify_brc29_payment`** / **`verify_brc29_payment_output`** (0.3.6) — checks, before anything is internalized, that a BRC-29 payment output pays *this* server's derived key at least the quoted amount inside a structurally complete BEEF, with merkle roots checked against a header service you run (required: no service, no verdict; `verify_brc29_payment_structural_only` is the named opt-out without SPV). For callers with their own payment flow; the stock middleware runs `verify_brc29_payment_output` itself (0.3.8).
-- **Optional `d1-claims` feature** (0.3.6) — `claim_payment_nonce` / `release_payment_nonce`: an atomic, globally consistent single-use claim on a payment nonce in a D1 table, for callers outside the stock middleware or on the eventually-consistent KV backend.
+- **`process_auth`** / **`process_auth_with_storage`** - BRC-103/104 mutual identity handshake, session verification, certificate exchange, and per-request replay protection (each `x-bsv-auth-nonce` is single-use per session). Returns the authenticated identity key, a reusable session handle, and the raw request body. Every authentication refusal is a 401 response from the middleware itself (0.4.1), with CORS, unsigned; an `Err` is a fault (storage, the server's key, the transport).
+- **`process_payment_with_storage`** - BRC-29 payment verification. Emits `402 Payment Required` with derivation prefix, accepts `x-bsv-payment` header, reads output 0 of the payment and refuses it (`400 ERR_INVALID_PAYMENT`, the quote kept) unless it pays this server's BRC-29 derived key at least the price (0.3.8; 400 since 0.4.0), internalizes via a remote wallet storage endpoint, gates on the wallet's `accepted` flag, and enforces single-use derivation prefixes. `satoshis_paid` is the amount read from the output. (`process_payment` remains as a deprecated stateless variant.)
+- **`sign_json_response`** - signs outbound JSON responses so BRC-103/104 clients (e.g. `AuthFetch`) can verify server identity and message integrity. Equivalent to Express's `res.json` hijacking, but explicit.
+- **`WorkerStorageClient`** - WASM-compatible RPC client for a wallet storage server (e.g. `storage.babbage.systems`), used by `process_payment` and optional refund flows.
+- **Optional `refund` feature** - BRC-41 refund transaction builder for partial-refund scenarios (e.g. AI agents that pre-charge and refund on failure). Not present in the Express reference.
+- **`verify_brc29_payment`** / **`verify_brc29_payment_output`** (0.3.6) - checks, before anything is internalized, that a BRC-29 payment output pays *this* server's derived key at least the quoted amount inside a structurally complete BEEF, with merkle roots checked against a header service you run (required: no service, no verdict; `verify_brc29_payment_structural_only` is the named opt-out without SPV). For callers with their own payment flow; the stock middleware runs `verify_brc29_payment_output` itself (0.3.8).
+- **Optional `d1-claims` feature** (0.3.6) - `claim_payment_nonce` / `release_payment_nonce`: an atomic, globally consistent single-use claim on a payment nonce in a D1 table, for callers outside the stock middleware or on the eventually-consistent KV backend.
 
 ## Shape (0.4.0): the core and the adapter
 
@@ -35,13 +35,26 @@ wants the words or the traits directly.
 
 Workers are request-scoped and have no in-process memory, so a direct port of the Express middleware isn't possible. Adaptations:
 
-- **Sessions in Cloudflare KV** (`KvSessionStorage`) — configurable TTL, keyed by session nonce plus an identity index for lookups.
-- **Payments in Cloudflare KV** (`KvPaymentStorage`) — duplicate-txid detection, unspent tracking, derivation prefix lifecycle.
-- **No `res.json` hijacking** — Workers can't intercept response construction. Call `sign_json_response(&body, status, &[], &session)` explicitly before returning.
-- **Remote wallet instead of local wallet object** — Workers can't host a `WalletInterface`, so `WorkerStorageClient` speaks JSON-RPC to a storage server over HTTP, authenticated by BRC-103/104.
-- **Async everywhere** — KV reads, HTTP calls, and auth verification are all `async`, matching the Workers runtime.
+- **Sessions in Cloudflare KV** (`KvSessionStorage`) - configurable TTL, keyed by session nonce plus an identity index for lookups.
+- **Payments in Cloudflare KV** (`KvPaymentStorage`) - duplicate-txid detection, unspent tracking, derivation prefix lifecycle.
+- **No `res.json` hijacking** - Workers can't intercept response construction. Call `sign_json_response(&body, status, &[], &session)` explicitly before returning.
+- **Remote wallet instead of local wallet object** - Workers can't host a `WalletInterface`, so `WorkerStorageClient` speaks JSON-RPC to a storage server over HTTP, authenticated by BRC-103/104.
+- **Async everywhere** - KV reads, HTTP calls, and auth verification are all `async`, matching the Workers runtime.
 
 Error codes, HTTP statuses, and all `x-bsv-auth-*` / `x-bsv-payment-*` header names are identical to the Express versions. Clients that talk to Express middleware will talk to this middleware unchanged.
+
+## Install
+
+```toml
+bsv-middleware-cloudflare = "0.5.2"
+# Runtime-free hosts:
+bsv-middleware-core = "0.2.2"
+```
+
+Both crates require bsv-rs 0.4.5 or later in 0.4.x, with no API change. They set no work or memory bound.
+A local evaluator decline names the resource and input as payer-side `Unverifiable` (`SpendRefused`),
+400 `ERR_PAYMENT_INVALID` in the adapter. A lone hashed leaf at a nonzero offset is refused by the
+SDK's `MerklePath`, with a payer-side refusal naming the offset. See [the migration](CHANGELOG.md).
 
 ## Quick start
 
@@ -102,8 +115,8 @@ Secret: `wrangler secret put SERVER_PRIVATE_KEY` (64-char hex secp256k1 private 
 
 | Feature | Default | Pulls in |
 |---|---|---|
-| `refund` | off | `bsv-middleware-core/refund` (`ripemd`) — enables `refund::issue_refund` for BRC-41 partial refunds |
-| `d1-claims` | off | `worker/d1` — enables `payment_claims::{claim_payment_nonce, release_payment_nonce}` (atomic single-use payment-nonce claims on a D1 table) |
+| `refund` | off | `bsv-middleware-core/refund` (`ripemd`) - enables `refund::issue_refund` for BRC-41 partial refunds |
+| `d1-claims` | off | `worker/d1` - enables `payment_claims::{claim_payment_nonce, release_payment_nonce}` (atomic single-use payment-nonce claims on a D1 table) |
 
 ## Parity with Express middleware
 
@@ -134,7 +147,7 @@ Deliberate hardening divergences (the reference is weaker here; security audit f
 
 Known production consumers using BRC-103/104 auth + dynamic pricing + optional refund:
 
-- `bsv-messagebox-cloudflare` — BSV peer-to-peer messaging service (upcoming public release)
+- `bsv-messagebox-cloudflare` - BSV peer-to-peer messaging service (upcoming public release)
 - Various agents (image gen, LLM inference) that pre-charge and refund on upstream failure
 
 ## License
@@ -220,7 +233,7 @@ is the one predicate the table needs.
 | `NoHeaderService` | 500 | `ERR_SERVER_MISCONFIGURED` | fix the deployment |
 | `KeyDerivation` (the server's key) | 500 | the host's own | fix the deployment |
 | `Unverifiable { reason }`, `is_server_side()` (`HeaderLookupFailed`) | 503 | `ERR_HEADER_SERVICE_UNAVAILABLE` | kept: retry the SAME payment once the service answers |
-| `Unverifiable { reason }`, the payer's (`InvalidBeef`, `SpendRefused`, `NoProof`, `OutputMissing`, `NoTransaction`, `MalformedTransaction`, the sender's `KeyDerivation`) | 400 | `ERR_PAYMENT_INVALID` | kept: send another payment |
+| `Unverifiable { reason }`, the payer's (`InvalidBeef`, `SpendRefused` including work or memory declines naming the input, `NoProof`, `OutputMissing`, `NoTransaction`, `MalformedTransaction`, the sender's `KeyDerivation`) | 400 | `ERR_PAYMENT_INVALID` | kept: send another payment |
 | `Underpaid`, `WrongScript`, `RootMismatch` | 400 | `ERR_PAYMENT_INVALID` | kept |
 | `Ok(satoshis)` | serve | | |
 
@@ -252,13 +265,13 @@ after `verify_brc29_payment` succeeds and before internalizing; `release_payment
 pre-internalize failure.
 
 ```toml
-bsv-middleware-cloudflare = { version = "0.4.0", features = ["d1-claims"] }
+bsv-middleware-cloudflare = { version = "0.5.2", features = ["d1-claims"] }
 ```
 
 ## Session storage backends
 
-- **KV (default)** — `process_auth(req, &env, &options)`: sessions and the per-request nonce replay guard in the `AUTH_SESSIONS` KV namespace (a read, and a read + write, per authenticated request).
-- **Durable Objects (0.3.3, opt-in)** — `process_auth_do(req, &env, &options, "AUTH_SESSION_STORE")`: one `AuthSessionStore` object per session nonce holds the session record and the consumed nonces, so a request costs two same-colo object round trips and no KV write; KV stays the cold path (the identity → session index written at the handshake, a KV-minted session migrated on first sight, the BRC-29 payment nonce scope). Bind the class and add a migration:
+- **KV (default)** - `process_auth(req, &env, &options)`: sessions and the per-request nonce replay guard in the `AUTH_SESSIONS` KV namespace (a read, and a read + write, per authenticated request).
+- **Durable Objects (0.3.3, opt-in)** - `process_auth_do(req, &env, &options, "AUTH_SESSION_STORE")`: one `AuthSessionStore` object per session nonce holds the session record and the consumed nonces, so a request costs two same-colo object round trips and no KV write; KV stays the cold path (the identity → session index written at the handshake, a KV-minted session migrated on first sight, the BRC-29 payment nonce scope). Bind the class and add a migration:
 
 ```toml
 [[durable_objects.bindings]]

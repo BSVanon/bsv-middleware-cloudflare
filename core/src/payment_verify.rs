@@ -5,7 +5,7 @@
 //!
 //! A valid payment is never refused for its size or its counts (the ruling
 //! of 2026-10-09, "a BEEF of any size"). The payment is read ONCE through
-//! the streaming reader of bsv-rs 0.4 (0.4.1 at least)
+//! the streaming reader of bsv-rs 0.4 (0.4.5 at least)
 //! ([`bsv_sdk::transaction::verify_stream`]): the reader holds one element
 //! of the BEEF and its index, never the BEEF; a tap beside it notes the
 //! subject's output as the bytes pass. A refusal of the bytes names the
@@ -74,7 +74,7 @@
 
 use std::io::Read;
 
-use bsv_sdk::transaction::beef_stream::{display_hex, Hash32, Step};
+use bsv_sdk::transaction::beef_stream::{display_hex, Hash32, SpendRefusal, Step};
 use bsv_sdk::transaction::{
     verify_stream, verify_stream_structure, BeefDecoder, Element, Headers, Reason, Refusal, Verdict,
 };
@@ -137,6 +137,7 @@ pub async fn verify_brc29_payment<H: HeaderService + ?Sized>(
 /// hashed, so a host records and internalizes without parsing the BEEF a
 /// second time); `Ok(Err(word))` is a refusal in the core's words (never
 /// `Verified`); `Err(fault)` is the host's own fault.
+/// A host choosing a per-input budget would use `StreamVerifier::set_work_limit` here; this crate leaves it `None`.
 #[allow(clippy::too_many_arguments)]
 pub async fn verify_brc29_payment_verified<H: HeaderService + ?Sized>(
     server_key: &str,
@@ -399,7 +400,18 @@ impl<'p> Tap<'p> {
                     offset,
                     txid: display_hex(&txid),
                     input,
-                    why: format!("{why:?}"),
+                    why: match why {
+                        SpendRefusal::Resource(limit) => {
+                            let bound = match limit.resource {
+                                bsv_sdk::script::ScriptResource::Work => "work",
+                                bsv_sdk::script::ScriptResource::Stack
+                                | bsv_sdk::script::ScriptResource::AltStack
+                                | bsv_sdk::script::ScriptResource::ElementSize => "memory",
+                            };
+                            format!("script declined under a {bound} resource bound: {limit:?}")
+                        }
+                        other => format!("{other:?}"),
+                    },
                 }))
             }
         };
@@ -614,6 +626,78 @@ mod tests {
                 lock_time: 0,
             },
         }
+    }
+
+    #[test]
+    fn resource_declines_name_the_input_and_are_the_payers_side() {
+        use bsv_sdk::script::{ScriptResource, ScriptResourceLimit};
+        for resource in [
+            ScriptResource::Work,
+            ScriptResource::Stack,
+            ScriptResource::AltStack,
+            ScriptResource::ElementSize,
+        ] {
+            let limit = ScriptResourceLimit {
+                resource,
+                limit: 10,
+                attempted: 11,
+                work_spent: (resource == ScriptResource::Work).then_some(10),
+            };
+            let verdict = Tap::new("", 0, 0)
+                .settle(Verdict::SpendRefused {
+                    offset: 42,
+                    txid: [7; 32],
+                    input: Some(3),
+                    why: SpendRefusal::Resource(limit),
+                })
+                .err()
+                .unwrap();
+            let reason = reason_of(&verdict);
+            assert!(!reason.is_server_side());
+            assert!(matches!(
+                reason,
+                UnverifiableReason::SpendRefused {
+                    offset: 42,
+                    input: Some(3),
+                    ..
+                }
+            ));
+            let text = reason.to_string();
+            assert!(
+                text.contains("input 3") && text.contains("script declined under a"),
+                "{text}"
+            );
+            assert!(text.contains(&format!("{resource:?}")), "{text}");
+            assert!(!text.contains("invalid"), "{text}");
+        }
+    }
+
+    #[tokio::test]
+    async fn lone_leaf_at_nonzero_offset_is_a_named_payer_refusal() {
+        use bsv_sdk::transaction::{MerklePath, MerklePathLeaf};
+        let parent = proven_parent(vec![0x51], 1000);
+        let subject = spending(&parent, &[(1000, our_script_bytes())]);
+        let (bytes, root) = beef_of(&[&parent, &subject], true);
+        let mut beef = Beef::from_binary(&bytes).unwrap();
+        let path = MerklePath {
+            block_height: PROOF_HEIGHT,
+            path: vec![vec![MerklePathLeaf::new_txid(1, root.clone())]],
+        };
+        let sdk_reason = path.compute_root(None).unwrap_err().to_string();
+        assert!(sdk_reason.contains("0"), "{sdk_reason}");
+        assert!(MerklePath::from_binary(&path.to_binary()).is_err());
+        beef.bumps[0] = path;
+        let headers = Stub::root(&root);
+        let verdict = full(&beef.to_binary(), &headers).await;
+        let reason = reason_of(&verdict);
+        assert!(!reason.is_server_side());
+        assert!(matches!(reason, UnverifiableReason::InvalidBeef { .. }));
+        let text = reason.to_string();
+        assert!(
+            text.contains("offset") && text.contains("MissingSibling"),
+            "{text}"
+        );
+        assert!(headers.asked().is_empty());
     }
 
     // ---- the stack-lean question: are the scripts run? ----

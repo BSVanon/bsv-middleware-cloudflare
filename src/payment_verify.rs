@@ -1518,6 +1518,29 @@ mod tests {
         }
     }
 
+    #[test]
+    fn test_resource_decline_stays_payer_side_in_the_adapter() {
+        for bound in ["work", "memory"] {
+            let error = accept_verdict(PaymentVerdict::Unverifiable {
+                reason: UnverifiableReason::SpendRefused {
+                    offset: 42,
+                    txid: "ab".into(),
+                    input: Some(3),
+                    why: format!("script declined under a {bound} resource bound"),
+                },
+            })
+            .unwrap_err();
+            assert!(matches!(error, PaymentVerifyError::Unverifiable { .. }));
+            assert!(!error.is_server_side());
+            let text = error.to_string();
+            assert!(
+                text.contains("input 3") && text.contains(bound) && text.contains("declined"),
+                "{text}"
+            );
+            assert!(!text.contains("retry the same payment"), "{text}");
+        }
+    }
+
     /// The one visible match, as a table: every core word lands on its 0.3
     /// result; `Verified` is the only `Ok`, and every `Unverifiable` is
     /// refused (fail-closed) as the same-named `Err` carrying the reason, so
