@@ -7,16 +7,58 @@ rules to its runtime; `bsv-middleware-cloudflare` (0.4.0 and later) is the Cloud
 ## Install
 
 ```toml
-bsv-middleware-core = "0.2.2"
+bsv-middleware-core = "0.3.0"
 ```
 
-The SDK floor is bsv-rs 0.4.5; no API change in the core or adapter 0.5.2.
+The SDK floor is bsv-rs 0.5.0 (caret); core 0.3.0 adds a source API and an optional work limit.
 A script declining under a work or memory bound is payer-side `Unverifiable` with
 `SpendRefused`, naming the decline and input (400 `ERR_PAYMENT_INVALID` in the adapter).
 The crates set no bound themselves. The SDK's `MerklePath` refuses a lone hashed leaf
 at a nonzero offset; the payment refusal is payer-side and names the offset.
 LOW's tower, the relay's door, Zanaadu's door and wallet-infra should follow
 [the re-pin migration](CHANGELOG.md).
+
+## Sources, multipart payments and work budgets
+
+Core callers add `work_limit: None` to `verify_brc29_payment` and
+`verify_brc29_payment_verified`. `verify_brc29_payment_stream` takes an
+`AsyncByteSource`; `SliceSource` is the bounded-chunk slice wrapper.
+Implement `HeaderService::mining_tip` for finality and coinbase maturity.
+Missing context is a server-side `MiningContextUnavailable`, never a guessed verdict.
+
+The adapter keeps its existing verify signatures with no budget. Read
+`payment_work_limit(&env)?` once and pass it to `verify_brc29_payment_budgeted`
+or `verify_brc29_payment_source`. `PAYMENT_WORK_LIMIT` is optional: absent or
+blank means no bound, a positive decimal u64 bounds each unproven input,
+and `0` or a non-number is `BadWorkLimit`, 500 `ERR_SERVER_MISCONFIGURED`.
+The fleet uses `1000000` units per input; a one-input P2PKH witness needs 490.
+A resource decline is payer-side, 400 `ERR_PAYMENT_INVALID`, with the quote kept.
+The bound is per input, not per request. The Worker's configured CPU cap bounds
+total request work (Paid defaults to 30 seconds); this release adds no request clock.
+
+After authentication, use `split_multipart_payment(&req, body)` and feed
+`payment.transaction()` to the source verifier with `payment.prefix()` and
+`payment.suffix()`. The original multipart body moves into `PaymentPart`;
+only the handler payload is copied out, and base64 decodes in 3 KB chunks.
+The x402 helper switches above **8,192 bytes of payment JSON**, when multipart
+is advertised. It sends an `x-bsv-payment` JSON part and an optional binary
+`body` part. This is the helper's threshold, replacing the design's approximate
+16 KB. The old `prepare_multipart_payment` remains available, deprecated.
+BRC-104 authenticates the entire body before payment verification; its digest
+path holds one body copy. Signed refusal payloads keep their existing shape.
+
+`UrlHeaderService` uses `/findChainTipHeaderHex`, `/getChain`, and up to ten
+`/findHeaderHexForBlockHash?hash=...` lookups to compute the tip's median time
+past from its ancestry. Mainnet and testnet activation heights follow the SV
+node's chain parameters. No candidate block time is guessed before CSV:
+pre-CSV time locks decline without explicit context from a custom service.
+
+Native size witness: the 64,004,742-byte body verifies, but the core's
+incremental peak is 7,109,677 bytes. The SDK reader alone uses 7,013,135 bytes.
+The design's below-4-MB target is therefore not met on bsv-rs 0.5.0. The
+ignored `stream_memory` test retains that assertion so the missed gate stays
+visible; it requires a dependency change or an owner-approved revised bound.
+No Cloudflare 30 MB multipart memory/control run has been made in this crate lane.
 
 ## What it decides
 
@@ -34,9 +76,9 @@ pub enum PaymentVerdict {
 ```
 
 **A BEEF of any size.** A valid payment is never refused for its size or its counts (the owner's ruling of
-2026-10-09): the payment is read once through the streaming reader of bsv-rs 0.4 (0.4.5 at least;
+2026-10-09): the payment is read once through the streaming reader of bsv-rs 0.5 (0.5.0 at least;
 `transaction::verify_stream`), one element in hand, the scripts run; a refusal of the bytes names the offset and the
-reader's kind. No bound lives here.
+reader's kind. No size bound lives here; the caller may bound work per input.
 
 `verify_brc29_payment` runs, in order: the service gate (`None` is `NoHeaderService`, fail closed, before the bytes
 are read); the reader (a valid BEEF whose unproven transactions spend the parent outputs it carries; invalid bytes
@@ -49,7 +91,7 @@ closed, by the rule adopted 2026-10-08: an unchecked root is not evidence); ever
 `verify_brc29_payment_verified` answers the same with the subject's txid (`VerifiedPayment { satoshis, txid }`).
 
 `UnverifiableReason` splits the class (the no-root ruling of 2026-10-09): `is_server_side()` is true for
-`HeaderLookupFailed` alone (the host's 5xx with the quote kept; the same payment retried later) and false for every
+`HeaderLookupFailed` and `MiningContextUnavailable` (the host's 5xx with the quote kept; the same payment retried later) and false for every
 other reason (the payer's: the host's 4xx, no fields, another payment). `PaymentFault` (an `Err`) is the host's own
 fault alone: the server's key does not derive. A payer's bytes never produce an `Err`.
 

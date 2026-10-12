@@ -14,7 +14,7 @@ use worker::{Headers, Request};
 
 pub use bsv_middleware_core::brc104::{auth_headers, HttpRequestData, HttpResponseData};
 use bsv_middleware_core::brc104::{
-    build_request_payload, message_to_headers, signable_request_headers,
+    build_request_payload, message_to_headers, request_payload_digest, signable_request_headers,
 };
 
 /// Transport utilities for Cloudflare Workers.
@@ -90,6 +90,23 @@ impl CloudflareTransport {
     /// body bytes. For General messages this is the body consumed during auth payload
     /// construction. For handshake messages this is empty (handshake body is protocol JSON).
     pub async fn extract_auth_message(req: &mut Request) -> Result<(AuthMessage, Vec<u8>)> {
+        let (message, body, _) = Self::extract_auth_message_inner(req, false).await?;
+        Ok((message, body))
+    }
+
+    /// Extract a message and one owned body, hashing its signed frame incrementally.
+    /// General messages have no payload copy; verify the returned digest.
+    pub async fn extract_auth_message_digest(
+        req: &mut Request,
+    ) -> Result<(AuthMessage, Vec<u8>, Option<[u8; 32]>)> {
+        Self::extract_auth_message_inner(req, true).await
+    }
+
+    async fn extract_auth_message_inner(
+        req: &mut Request,
+        digest_only: bool,
+    ) -> Result<(AuthMessage, Vec<u8>, Option<[u8; 32]>)> {
+        let mut digest = None;
         // Extract header values first before consuming the body
         let version = req
             .headers()
@@ -175,7 +192,6 @@ impl CloudflareTransport {
                 .map_err(|e| AuthCloudflareError::TransportError(e.to_string()))?;
 
             // Capture raw body bytes for passthrough to handlers
-            raw_body_bytes = body.clone();
 
             let search = full_url
                 .query()
@@ -188,15 +204,27 @@ impl CloudflareTransport {
             let signable_headers = signable_request_headers(req.headers());
 
             // Build payload with HTTP metadata
-            let payload = build_request_payload(
-                &request_id,
-                &method,
-                full_url.path(),
-                &search,
-                &signable_headers,
-                &body,
-            );
-            msg.payload = Some(payload);
+            if digest_only {
+                digest = Some(request_payload_digest(
+                    &request_id,
+                    &method,
+                    full_url.path(),
+                    &search,
+                    &signable_headers,
+                    &body,
+                ));
+            } else {
+                let payload = build_request_payload(
+                    &request_id,
+                    &method,
+                    full_url.path(),
+                    &search,
+                    &signable_headers,
+                    &body,
+                );
+                msg.payload = Some(payload);
+            }
+            raw_body_bytes = body;
         } else {
             // For handshake messages, body is JSON (not passed through)
             raw_body_bytes = vec![];
@@ -232,7 +260,7 @@ impl CloudflareTransport {
             }
         }
 
-        Ok((msg, raw_body_bytes))
+        Ok((msg, raw_body_bytes, digest))
     }
 
     /// Builds response headers from an AuthMessage

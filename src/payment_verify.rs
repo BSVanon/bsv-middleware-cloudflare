@@ -19,13 +19,12 @@
 //!
 //! ## A payment of any size (0.5.0)
 //!
-//! The payment is read ONCE through the streaming reader of bsv-rs 0.4 (0.4.5 at least)
+//! The payment is read ONCE through the streaming reader of bsv-rs 0.5 (0.5.0 at least)
 //! (`transaction::verify_stream`), the scripts run: every unproven
 //! transaction's inputs are executed against the parent outputs the BEEF
 //! carries, and an Atomic subject is held to its rule. A valid payment is
 //! never refused for its size or its counts; a refusal of the bytes names
-//! the offset and the reader's kind. This crate carries no limit, no count
-//! bound and no 413 (the posture of 2026-10-09, "a BEEF of any size").
+//! the offset and the reader's kind. This crate carries no size limit or count bound and no 413 (the posture of 2026-10-09, "a BEEF of any size").
 //!
 //! ## What the words map to (0.5.0)
 //!
@@ -186,6 +185,8 @@ pub enum PaymentVerifyError {
     /// skip. Pass your own header service, or opt out of SPV by name with
     /// [`verify_brc29_payment_structural_only`].
     NoHeaderService,
+    /// Invalid PAYMENT_WORK_LIMIT: the host's own 500 ERR_SERVER_MISCONFIGURED.
+    BadWorkLimit { value: String },
     /// The payment cannot be verified; `reason` says what and whose side.
     /// Server-side ([`UnverifiableReason::is_server_side`], the header
     /// service could not answer at `HeaderLookupFailed.height`): fail-closed
@@ -202,6 +203,23 @@ pub enum PaymentVerifyError {
 }
 
 impl PaymentVerifyError {
+    /// HTTP status and public class for a signed refusal; the quote stays intact.
+    pub fn response_class(&self) -> (u16, &'static str) {
+        match self {
+            Self::NoHeaderService
+            | Self::BadWorkLimit { .. }
+            | Self::KeyDerivation(_)
+            | Self::Source(_) => (500, "ERR_SERVER_MISCONFIGURED"),
+            Self::Unverifiable { reason } if reason.is_server_side() => {
+                (503, "ERR_HEADER_SERVICE_UNAVAILABLE")
+            }
+            Self::Unverifiable { .. }
+            | Self::WrongScript { .. }
+            | Self::Underpaid { .. }
+            | Self::RootMismatch { .. } => (400, "ERR_PAYMENT_INVALID"),
+        }
+    }
+
     /// `true` when the server, not the payment, is why the payment was
     /// refused for the moment: [`Unverifiable`](Self::Unverifiable) with a
     /// server-side reason (the header service could not answer). Render it
@@ -237,6 +255,7 @@ impl std::fmt::Display for PaymentVerifyError {
                 "Payment merkle root {} at height {} does not match the block header",
                 root, height
             ),
+            PaymentVerifyError::BadWorkLimit { value } => write!(f, "Invalid PAYMENT_WORK_LIMIT {value:?}: expected a positive decimal u64"),
             PaymentVerifyError::NoHeaderService => write!(
                 f,
                 "No header service configured for SPV: pass your own ChainTracks-compatible base URL as header_url, or opt out by name with verify_brc29_payment_structural_only"
@@ -484,6 +503,95 @@ async fn fetch_header_root(base_url: &str, height: u32) -> std::result::Result<S
     parse_header_response(&body, height)
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct MiningHeader {
+    height: u32,
+    time: u32,
+    hash: String,
+    previous_hash: String,
+}
+
+async fn fetch_chaintracks(base: &str, route: &str) -> Result<serde_json::Value, ServiceError> {
+    let url = format!("{base}/{route}");
+    let request = worker::Request::new(&url, worker::Method::Get)
+        .map_err(|e| ServiceError::new(e.to_string()))?;
+    let mut response = worker::Fetch::Request(request)
+        .send()
+        .await
+        .map_err(|e| ServiceError::new(e.to_string()))?;
+    if response.status_code() != 200 {
+        return Err(ServiceError::new(format!(
+            "header service HTTP {} for {route}",
+            response.status_code()
+        )));
+    }
+    let value: serde_json::Value = response
+        .json()
+        .await
+        .map_err(|e| ServiceError::new(e.to_string()))?;
+    if value["status"] != "success" {
+        return Err(ServiceError::new("header service did not answer success"));
+    }
+    Ok(value["value"].clone())
+}
+
+// SV node chainparams.cpp: main/test CSVHeight and GENESIS_ACTIVATION constants.
+// https://github.com/bitcoin-sv/bitcoin-sv/blob/master/src/chainparams.cpp
+fn network_heights(chain: &str) -> Result<(u32, u32), ServiceError> {
+    match chain {
+        "main" => Ok((620_538, 419_328)),
+        "test" => Ok((1_344_302, 770_112)),
+        _ => Err(ServiceError::new(
+            "unsupported mining network; supply an explicit HeaderService tip",
+        )),
+    }
+}
+
+fn mining_header(value: serde_json::Value) -> Result<MiningHeader, ServiceError> {
+    serde_json::from_value(value).map_err(|e| ServiceError::new(format!("mining header: {e}")))
+}
+
+async fn fetch_mining_tip(
+    base: &str,
+) -> Result<Option<bsv_middleware_core::ChainTip>, ServiceError> {
+    let tip = mining_header(fetch_chaintracks(base, "findChainTipHeaderHex").await?)?;
+    let network = fetch_chaintracks(base, "getChain").await?;
+    let (genesis_height, csv_height) = network_heights(
+        network
+            .as_str()
+            .ok_or_else(|| ServiceError::new("missing network"))?,
+    )?;
+    let mut times = vec![tip.time];
+    let mut height = tip.height;
+    let mut parent = tip.previous_hash;
+    // Follow this tip's actual ancestry, rather than mixing heights across a reorg.
+    for _ in 0..10 {
+        if height == 0 {
+            break;
+        }
+        if parent.len() != 64 || !parent.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err(ServiceError::new("invalid parent hash"));
+        }
+        let header = mining_header(
+            fetch_chaintracks(base, &format!("findHeaderHexForBlockHash?hash={parent}")).await?,
+        )?;
+        if header.height != height - 1 || !header.hash.eq_ignore_ascii_case(&parent) {
+            return Err(ServiceError::new("inconsistent tip ancestry"));
+        }
+        times.push(header.time);
+        height = header.height;
+        parent = header.previous_hash;
+    }
+    times.sort_unstable();
+    Ok(Some(bsv_middleware_core::ChainTip {
+        height: tip.height,
+        median_time_past: times[times.len() / 2],
+        genesis_height,
+        csv_height,
+        next_block_time: None,
+    }))
+}
 /// The core's [`HeaderService`] over a ChainTracks-compatible base URL,
 /// fetched with Workers `fetch`: `GET {base}/findHeaderHexForHeight?height={h}`.
 ///
@@ -514,6 +622,10 @@ impl UrlHeaderService {
 }
 
 impl HeaderService for UrlHeaderService {
+    async fn mining_tip(&self) -> Result<Option<bsv_middleware_core::ChainTip>, ServiceError> {
+        fetch_mining_tip(&self.base_url).await
+    }
+
     async fn merkle_root(
         &self,
         height: u32,
@@ -610,6 +722,7 @@ pub async fn verify_brc29_payment_verdict<H: HeaderService + ?Sized>(
         output_index,
         required_satoshis,
         service,
+        None,
     )
     .await?)
 }
@@ -754,6 +867,7 @@ pub async fn verify_brc29_payment_verified(
         output_index,
         required_satoshis,
         service.as_ref(),
+        None,
     )
     .await?
     {
@@ -763,6 +877,66 @@ pub async fn verify_brc29_payment_verified(
         Err(word) => {
             Err(accept_verdict(word).expect_err("the core's refusal side never carries Verified"))
         }
+    }
+}
+
+/// Full slice verification with an optional work limit per unproven input.
+/// Read the host var once with [`crate::env::payment_work_limit`] and pass it here.
+#[allow(clippy::too_many_arguments)]
+pub async fn verify_brc29_payment_budgeted(
+    server_key: &str,
+    sender_identity_key: &str,
+    derivation_prefix: &str,
+    derivation_suffix: &str,
+    tx_bytes: &[u8],
+    output_index: usize,
+    required_satoshis: u64,
+    header_url: Option<&str>,
+    work_limit: Option<u64>,
+) -> std::result::Result<VerifiedPayment, PaymentVerifyError> {
+    verify_brc29_payment_source(
+        server_key,
+        sender_identity_key,
+        derivation_prefix,
+        derivation_suffix,
+        &mut bsv_middleware_core::SliceSource::new(tx_bytes),
+        output_index,
+        required_satoshis,
+        header_url,
+        work_limit,
+    )
+    .await
+}
+
+/// Full source verification, including multipart base64 decoded in bounded chunks.
+#[allow(clippy::too_many_arguments)]
+pub async fn verify_brc29_payment_source<S: bsv_middleware_core::AsyncByteSource>(
+    server_key: &str,
+    sender_identity_key: &str,
+    derivation_prefix: &str,
+    derivation_suffix: &str,
+    source: &mut S,
+    output_index: usize,
+    required_satoshis: u64,
+    header_url: Option<&str>,
+    work_limit: Option<u64>,
+) -> std::result::Result<VerifiedPayment, PaymentVerifyError> {
+    let service = UrlHeaderService::resolve(header_url).ok();
+    match bsv_middleware_core::verify_brc29_payment_stream(
+        server_key,
+        sender_identity_key,
+        derivation_prefix,
+        derivation_suffix,
+        source,
+        output_index,
+        required_satoshis,
+        service.as_ref(),
+        work_limit,
+    )
+    .await?
+    {
+        Ok(verified) => Ok(verified),
+        Err(word) => Err(accept_verdict(word).expect_err("refusal never carries Verified")),
     }
 }
 
@@ -1921,5 +2095,15 @@ mod tests {
         );
         let boxed: Box<dyn std::error::Error> = Box::new(PaymentVerifyError::Source("x".into()));
         assert!(boxed.to_string().contains("source"));
+    }
+    #[test]
+    fn mining_tip_response_requires_context_and_known_network() {
+        let header = mining_header(serde_json::json!({"height":800000,"time":1700000000,"hash":"aa".repeat(32),"previousHash":"bb".repeat(32)})).unwrap();
+        assert_eq!(header.height, 800000);
+        assert_eq!(header.time, 1700000000);
+        assert!(mining_header(serde_json::json!({"height":800000})).is_err());
+        assert_eq!(network_heights("main").unwrap(), (620538, 419328));
+        assert_eq!(network_heights("test").unwrap(), (1344302, 770112));
+        assert!(network_heights("unknown").is_err());
     }
 }

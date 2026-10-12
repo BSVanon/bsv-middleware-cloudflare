@@ -1,13 +1,13 @@
 [package]
 name = "bsv-middleware-cloudflare"
-version = "0.5.2"
+version = "0.6.0"
 edition = "2021"
 description = "BSV BRC-103/104 authentication and BRC-29 payment middleware for Cloudflare Workers"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/Calhooon/bsv-middleware-cloudflare"
 keywords = ["bsv", "authentication", "cloudflare", "workers", "middleware"]
 categories = ["web-programming", "authentication", "cryptography"]
-exclude = ["CLAUDE.md", "src/**/CLAUDE.md", ".claude/**", "LEAK-CHECK-*.txt"]
+include = ["Cargo.toml", "README.md", "CHANGELOG.md", "LICENSE-*", "src/**/*.rs", "tests/**", "conformance/**", "examples/*.rs"]
 
 [workspace]
 members = [".", "core"]
@@ -17,13 +17,13 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 # The runtime-free rules this crate adapts to Workers (same repository, `core/`).
-bsv-middleware-core = { version = "0.2.2", path = "core" }
+bsv-middleware-core = { version = "0.3.0", path = "core" }
 
 # Cloudflare Workers
 worker = "0.8"
 
 # BSV SDK
-bsv-sdk = { package = "bsv-rs", version = "0.4.5", features = ["auth", "wallet", "transaction", "wasm"] }
+bsv-sdk = { package = "bsv-rs", version = "0.5.0", features = ["auth", "wallet", "transaction", "wasm"] }
 
 # Async
 futures = "0.3"

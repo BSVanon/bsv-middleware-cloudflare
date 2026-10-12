@@ -158,6 +158,7 @@ pub use bsv_middleware_core::{
     HeaderService, PaymentFault, PaymentVerdict, UnverifiableReason, VerifiedPayment,
 };
 pub use client::{ClientSessionSnapshot, WorkerStorageClient};
+pub use env::payment_work_limit;
 pub use error::{AuthCloudflareError, Result};
 pub use middleware::auth::{
     add_cors_headers, add_lane_cors_headers, mint_attested_lane, process_auth, process_auth_do,
@@ -166,7 +167,10 @@ pub use middleware::auth::{
     sign_response, AuthMiddlewareOptions, AuthResult, AuthSession, LaneAuth, LaneAuthResult,
     SessionLaneOptions,
 };
-pub use middleware::multipart::prepare_multipart_payment;
+#[allow(deprecated)]
+pub use middleware::multipart::{
+    prepare_multipart_payment, split_multipart_payment, MultipartPayment, PaymentPart,
+};
 #[allow(deprecated)] // re-exported for backward compatibility
 pub use middleware::payment::process_payment;
 pub use middleware::payment::{
@@ -179,10 +183,10 @@ pub use middleware::session_lane;
 pub use payment_claims::{claim_payment_nonce, release_payment_nonce, PAYMENT_CLAIMS_SCHEMA};
 pub use payment_verify::{
     accept_verdict, expected_brc29_locking_script, verify_brc29_payment,
-    verify_brc29_payment_output, verify_brc29_payment_structural_only,
-    verify_brc29_payment_verdict, verify_brc29_payment_verified,
-    verify_brc29_payment_with_header_lookup, PaymentVerifyError, UrlHeaderService,
-    DEFAULT_CHAINTRACKS_URL,
+    verify_brc29_payment_budgeted, verify_brc29_payment_output, verify_brc29_payment_source,
+    verify_brc29_payment_structural_only, verify_brc29_payment_verdict,
+    verify_brc29_payment_verified, verify_brc29_payment_with_header_lookup, PaymentVerifyError,
+    UrlHeaderService, DEFAULT_CHAINTRACKS_URL,
 };
 pub use storage::do_session::{AuthSessionStore, DoSessionStorage};
 pub use storage::{

@@ -3,6 +3,76 @@
 All notable changes to `bsv-middleware-core`. Versions below 1.0 may change public API between minor versions;
 patch versions are additive unless a line below says otherwise.
 
+## 0.3.0 - 2026-10-12
+
+The SDK floor in both crates is `bsv-rs = "0.5.0"` (caret). Core 0.3.0's
+primary check is `verify_brc29_payment_stream` over `AsyncByteSource`, with
+`work_limit: Option<u64>`; the two existing full slice functions are wrappers
+and now require the trailing work limit. The structural-only opt-out is unchanged.
+Adapter 0.6.0 preserves its six existing verify signatures with budget `None`,
+and adds `verify_brc29_payment_budgeted`, `verify_brc29_payment_source`,
+`payment_work_limit`, `split_multipart_payment`, `MultipartPayment` and `PaymentPart`.
+
+The authenticated body stays in one owned buffer. BRC-104 hashes the exact
+signed frame incrementally via `verify_message_digest`; multipart payment JSON
+borrows the base64 span and decodes 3 KB chunks. The helper's threshold is
+8,192 bytes of payment JSON, replacing the design's approximate 16 KB.
+`prepare_multipart_payment` is retained and deprecated. Signed refusals keep
+their existing wire shape.
+
+`PAYMENT_WORK_LIMIT` is optional, default none. Absent or blank preserves the
+unbounded path; a positive decimal u64 sets the budget per unproven input.
+An input exceeding it is payer-side `SpendRefused`, 400 `ERR_PAYMENT_INVALID`,
+with the quote kept. `0` and non-numbers are `BadWorkLimit { value }`, the
+host's own 500 `ERR_SERVER_MISCONFIGURED`. The fleet selects 1,000,000 units;
+the one-input P2PKH witness verifies at 490 and declines at 489. This is a
+per-input bound; the Worker's CPU cap is the total request bound, with no
+new request clock (Paid default 30 seconds).
+
+The new SDK byte kinds (`UnprovenCoinbase`, `NullOutpoint`, `DuplicateInput`,
+`ValueOutOfRange`) map to payer-side `InvalidBeef`. `InputValueOutOfRange`,
+`P2shOutput`, `NonFinal` and `PrematureCoinbase` map to payer-side
+`SpendRefused`. Missing `Finality` or `CoinbaseMaturity` evidence maps to
+server-side `MiningContextUnavailable`: the host failed to supply a tip,
+so it cannot claim the payer's transaction is invalid. Implement
+`HeaderService::mining_tip` for contextual verdicts. `UrlHeaderService` queries
+ChainTracks' `/findChainTipHeaderHex`, resolves the network through `/getChain`,
+and follows up to ten parent headers by hash for median time past. It supports
+mainnet and testnet; custom networks and pre-CSV candidate block time require
+an explicit host service. SDK consumers extend exhaustive `Kind`, `Reason`,
+`SpendRefusal`, `Stop`, `Verdict` matches and add `OutputRef.at` to literals.
+
+Migration by host:
+
+- Agents' 13 Workers: re-pin adapter 0.6.0/core 0.3.0 on bsv-rs 0.5.0.
+  Paying doors read the var once, use the budgeted/source verifier, set
+  `PAYMENT_WORK_LIMIT = "1000000"`, map `BadWorkLimit` to their signed 500,
+  and switch multipart extraction to `split_multipart_payment`. The viewer
+  has no payment door. Locks and manifests land in the fleet's separate wave.
+- LOW's tower: re-pin core 0.3.0, add the trailing `None` or chosen budget
+  to direct core calls, and supply `HeaderService::mining_tip`.
+- The relay's door: re-pin adapter 0.6.0, extend the exhaustive error match
+  with `BadWorkLimit` as signed 500; optionally select a budget and source API.
+- Zanaadu's door: re-pin adapter 0.6.0, extend the exhaustive error match
+  with `BadWorkLimit` as signed 500; optionally select a budget and source API.
+- wallet-infra: update its exact adapter pin to 0.6.0, extend the error match
+  with the host's 500 arm, and select a budget by its own honest ceiling.
+- The template: re-pin adapter 0.6.0, use the budgeted/source verifier,
+  add the `BadWorkLimit` 500 arm and `PAYMENT_WORK_LIMIT = "1000000"` example.
+
+The 22 owned payment vectors remain byte-identical. Crate witnesses cover the
+work decline, honest boundary, default unbounded control, multipart helper
+shape, mining refusals and chunk independence. No vector was added to the owned file.
+
+
+Native size witness: the 64,004,742-byte body verifies, but the core's
+incremental peak is 7,109,677 bytes. The SDK reader alone uses 7,013,135 bytes.
+The design's below-4-MB target is therefore not met on bsv-rs 0.5.0. The
+ignored `stream_memory` test retains that assertion so the missed gate stays
+visible; it requires a dependency change or an owner-approved revised bound.
+No Cloudflare 30 MB multipart memory/control run has been made in this crate lane.
+
+
 ## 0.2.2 - 2026-10-12
 
 The floor is `bsv-rs = "0.4.5"` (caret); no API change in either crate.

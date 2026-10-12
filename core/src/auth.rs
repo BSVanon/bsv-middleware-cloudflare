@@ -164,6 +164,41 @@ pub fn verify_message_signature(
     }
 }
 
+/// Verify an already hashed message using the session's identity binding.
+/// The caller must hash exactly `message.signing_data()`; General HTTP messages
+/// use [`crate::brc104::request_payload_digest`].
+pub fn verify_message_digest(
+    wallet: &ProtoWallet,
+    message: &AuthMessage,
+    session: &SessionBinding,
+    digest: [u8; 32],
+) -> Result<bool, AuthError> {
+    let signature = message
+        .signature
+        .as_ref()
+        .ok_or_else(|| AuthError::InvalidAuthentication("Message not signed".into()))?;
+
+    let key_id = message.get_key_id(Some(session.session_nonce.as_str()));
+    let Ok(session_identity) = PublicKey::from_hex(&session.peer_identity_key) else {
+        return Ok(false); // a session whose identity is not a key verifies nothing
+    };
+
+    let result = wallet.verify_signature(VerifySignatureArgs {
+        data: None,
+        hash_to_directly_verify: Some(digest),
+        signature: signature.clone(),
+        protocol_id: auth_protocol(),
+        key_id,
+        counterparty: Some(Counterparty::Other(session_identity)),
+        for_self: None,
+    });
+
+    match result {
+        Ok(r) => Ok(r.valid),
+        Err(_) => Ok(false),
+    }
+}
+
 /// Whether the identity a message claims in its header IS the session's
 /// (case-insensitive hex). A general message naming another identity over
 /// this session is refused by name before its signature is judged.
@@ -577,5 +612,28 @@ mod tests {
         assert!(e.to_string().starts_with("SDK error"));
         let boxed: Box<dyn std::error::Error> = Box::new(e);
         assert!(!boxed.to_string().is_empty());
+    }
+    #[test]
+    fn direct_digest_verifies_identically_and_rejects_tampering() {
+        use sha2::{Digest, Sha256};
+        let server = test_wallet(SERVER_KEY_HEX);
+        let client = test_wallet(CLIENT_KEY_HEX);
+        let binding = SessionBinding::new(
+            "s-nonce",
+            test_key(CLIENT_KEY_HEX).to_hex(),
+            Some("c".into()),
+        );
+        let message =
+            sign_general_message(&server, &binding, b"authenticated multipart body".to_vec())
+                .unwrap();
+        let digest: [u8; 32] = Sha256::digest(message.signing_data()).into();
+        let verify_binding = client_side("c", "s-nonce");
+        assert!(verify_message_signature(&client, &message, &verify_binding).unwrap());
+        let mut without_payload = message;
+        without_payload.payload = None;
+        assert!(verify_message_digest(&client, &without_payload, &verify_binding, digest).unwrap());
+        let mut bad = digest;
+        bad[0] ^= 1;
+        assert!(!verify_message_digest(&client, &without_payload, &verify_binding, bad).unwrap());
     }
 }

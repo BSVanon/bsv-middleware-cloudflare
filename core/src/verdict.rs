@@ -68,8 +68,20 @@ pub enum PaymentVerdict {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum UnverifiableReason {
+    /// Header context needed for finality or coinbase maturity was unavailable.
+    /// The host must supply a tip; the same payment may be retried. Server-side.
+    MiningContextUnavailable {
+        /// Byte offset of the contextual check.
+        offset: u64,
+        /// Spending transaction in display hex.
+        txid: String,
+        /// Input if the check names one.
+        input: Option<u32>,
+        /// Finality or CoinbaseMaturity.
+        check: String,
+    },
     /// The BEEF's bytes are invalid: the stream offset of the byte and one
-    /// of the streaming reader's kinds (bsv-rs 0.4.5 or later,
+    /// of the streaming reader's kinds (bsv-rs 0.5.0 or later,
     /// `transaction::beef_stream::Kind`, as its name; `NoInputs`, since
     /// 0.4.1, for a raw transaction with no input, at its leading byte). The
     /// reading stopped there. The payer's side.
@@ -157,17 +169,21 @@ pub enum UnverifiableReason {
 
 impl UnverifiableReason {
     /// `true` when the server, not the payment, is why it cannot be
-    /// verified: [`HeaderLookupFailed`](Self::HeaderLookupFailed) alone.
+    /// verified: [`HeaderLookupFailed`](Self::HeaderLookupFailed) or missing mining context.
     /// A host answers a server-side reason 5xx with the quote kept (retry
     /// the same payment) and every other reason 4xx (send another payment).
     pub fn is_server_side(&self) -> bool {
-        matches!(self, Self::HeaderLookupFailed { .. })
+        matches!(
+            self,
+            Self::HeaderLookupFailed { .. } | Self::MiningContextUnavailable { .. }
+        )
     }
 }
 
 impl fmt::Display for UnverifiableReason {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::MiningContextUnavailable { offset, txid, input, check } => write!(f, "mining context unavailable for {check}: transaction {txid} at offset {offset}, input {input:?}; the host must supply a tip"),
             Self::InvalidBeef {
                 offset,
                 kind,

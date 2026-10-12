@@ -5,15 +5,14 @@
 //!
 //! A valid payment is never refused for its size or its counts (the ruling
 //! of 2026-10-09, "a BEEF of any size"). The payment is read ONCE through
-//! the streaming reader of bsv-rs 0.4 (0.4.5 at least)
+//! the streaming reader of bsv-rs 0.5 (0.5.0 at least)
 //! ([`bsv_sdk::transaction::verify_stream`]): the reader holds one element
 //! of the BEEF and its index, never the BEEF; a tap beside it notes the
 //! subject's output as the bytes pass. A refusal of the bytes names the
-//! offset and one of the reader's eighteen kinds
+//! offset and one of the reader's twenty-four kinds
 //! ([`UnverifiableReason::InvalidBeef`]), none of which is a size or a
-//! count. This module carries no bound and exports none. (The bytes are
-//! held in hand by the caller in this release; a host that streams a
-//! request body through the same checks is the next one.)
+//! count. The caller may set a local work bound per input. The primary API takes
+//! an asynchronous byte source; slice APIs wrap it in bounded chunks.
 //!
 //! # Order of checks ([`verify_brc29_payment`])
 //!
@@ -72,11 +71,14 @@
 //! the opt-out; through [`verify_brc29_payment`] the word is always a
 //! refusal.
 
+pub use bsv_sdk::transaction::beef_stream::AsyncByteSource;
+use bsv_sdk::transaction::beef_stream::{AsyncStreamVerifier, ChainTip, MiningCheck};
+use bsv_sdk::transaction::{ChainTracker, ChainTrackerError};
 use std::io::Read;
 
 use bsv_sdk::transaction::beef_stream::{display_hex, Hash32, SpendRefusal, Step};
 use bsv_sdk::transaction::{
-    verify_stream, verify_stream_structure, BeefDecoder, Element, Headers, Reason, Refusal, Verdict,
+    verify_stream_structure, BeefDecoder, Element, Headers, Reason, Refusal, Verdict,
 };
 
 use crate::brc29::{derive_expected_script, judge_output};
@@ -89,6 +91,49 @@ use crate::verdict::{PaymentFault, PaymentVerdict, UnverifiableReason, VerifiedP
 /// the output is judged. The reader's verdict hands the roots back; none is
 /// accepted unasked.
 struct RootsAskedAfter;
+
+struct MiningContext(std::sync::Mutex<Option<ChainTip>>);
+
+#[async_trait::async_trait]
+impl ChainTracker for MiningContext {
+    async fn is_valid_root_for_height(
+        &self,
+        _root: &str,
+        _height: u32,
+    ) -> Result<bool, ChainTrackerError> {
+        Ok(true)
+    }
+    async fn current_height(&self) -> Result<u32, ChainTrackerError> {
+        Err(ChainTrackerError::Other(
+            "height alone is not mining context".into(),
+        ))
+    }
+    async fn mining_tip(&self) -> Result<Option<ChainTip>, ChainTrackerError> {
+        Ok(*self.0.lock().expect("mining context lock"))
+    }
+}
+
+/// A borrowed byte slice, read in bounded chunks without copying the whole BEEF.
+pub struct SliceSource<'a> {
+    bytes: &'a [u8],
+}
+impl<'a> SliceSource<'a> {
+    /// Read this slice as a source.
+    pub fn new(bytes: &'a [u8]) -> Self {
+        Self { bytes }
+    }
+}
+impl AsyncByteSource for SliceSource<'_> {
+    async fn next_chunk(&mut self) -> std::io::Result<Option<Vec<u8>>> {
+        if self.bytes.is_empty() {
+            return Ok(None);
+        }
+        let n = self.bytes.len().min(64 * 1024);
+        let chunk = self.bytes[..n].to_vec();
+        self.bytes = &self.bytes[n..];
+        Ok(Some(chunk))
+    }
+}
 
 impl Headers for RootsAskedAfter {
     fn carries(&self, _height: u64, _root: &Hash32) -> bool {
@@ -112,6 +157,7 @@ pub async fn verify_brc29_payment<H: HeaderService + ?Sized>(
     output_index: usize,
     required_satoshis: u64,
     service: Option<&H>,
+    work_limit: Option<u64>,
 ) -> Result<PaymentVerdict, PaymentFault> {
     Ok(
         match verify_brc29_payment_verified(
@@ -123,6 +169,7 @@ pub async fn verify_brc29_payment<H: HeaderService + ?Sized>(
             output_index,
             required_satoshis,
             service,
+            work_limit,
         )
         .await?
         {
@@ -137,7 +184,7 @@ pub async fn verify_brc29_payment<H: HeaderService + ?Sized>(
 /// hashed, so a host records and internalizes without parsing the BEEF a
 /// second time); `Ok(Err(word))` is a refusal in the core's words (never
 /// `Verified`); `Err(fault)` is the host's own fault.
-/// A host choosing a per-input budget would use `StreamVerifier::set_work_limit` here; this crate leaves it `None`.
+/// `work_limit` bounds each unproven input; `None` imposes no local budget.
 #[allow(clippy::too_many_arguments)]
 pub async fn verify_brc29_payment_verified<H: HeaderService + ?Sized>(
     server_key: &str,
@@ -148,6 +195,36 @@ pub async fn verify_brc29_payment_verified<H: HeaderService + ?Sized>(
     output_index: usize,
     required_satoshis: u64,
     service: Option<&H>,
+    work_limit: Option<u64>,
+) -> Result<Result<VerifiedPayment, PaymentVerdict>, PaymentFault> {
+    verify_brc29_payment_stream(
+        server_key,
+        sender_identity_key,
+        derivation_prefix,
+        derivation_suffix,
+        &mut SliceSource::new(tx_bytes),
+        output_index,
+        required_satoshis,
+        service,
+        work_limit,
+    )
+    .await
+}
+
+/// Verify a source with an optional local work bound per unproven input.
+/// Source failures are host faults. Missing mining context is server-side,
+/// never evidence that a payer's time lock or coinbase spend is invalid.
+#[allow(clippy::too_many_arguments)]
+pub async fn verify_brc29_payment_stream<S: AsyncByteSource, H: HeaderService + ?Sized>(
+    server_key: &str,
+    sender_identity_key: &str,
+    derivation_prefix: &str,
+    derivation_suffix: &str,
+    source: &mut S,
+    output_index: usize,
+    required_satoshis: u64,
+    service: Option<&H>,
+    work_limit: Option<u64>,
 ) -> Result<Result<VerifiedPayment, PaymentVerdict>, PaymentFault> {
     // 0. No header service, no verdict: refuse before the bytes are read.
     let Some(service) = service else {
@@ -166,15 +243,22 @@ pub async fn verify_brc29_payment_verified<H: HeaderService + ?Sized>(
     // 1 + 2. One pass over the bytes: the reader's validity (scripts run,
     //        every root granted for now) and the tap's output check.
     let mut tap = Tap::new(&expected, output_index, required_satoshis);
-    let verdict = verify_stream(
-        Tee {
-            source: tx_bytes,
-            tap: &mut tap,
-        },
-        RootsAskedAfter,
-        None,
-    )
-    .map_err(|e| PaymentFault::Source(e.to_string()))?;
+    let context = MiningContext(std::sync::Mutex::new(None));
+    let mut reader = AsyncStreamVerifier::new(None);
+    reader.set_work_limit(work_limit);
+    let verdict = reader
+        .run(
+            &mut TeeSource {
+                source,
+                tap: &mut tap,
+                service,
+                context: &context,
+                tip_read: false,
+            },
+            &context,
+        )
+        .await
+        .map_err(|e| PaymentFault::Source(e.to_string()))?;
     let Settled {
         satoshis,
         txid,
@@ -287,6 +371,7 @@ struct Tap<'p> {
     unanchored: Option<Hash32>,
     /// A BUMP claims a height no header service can be asked for.
     beyond_headers: Option<Refusal>,
+    needs_context: bool,
 }
 
 impl<'p> Tap<'p> {
@@ -301,6 +386,7 @@ impl<'p> Tap<'p> {
             subject: None,
             unanchored: None,
             beyond_headers: None,
+            needs_context: false,
         }
     }
 
@@ -340,6 +426,7 @@ impl<'p> Tap<'p> {
                 body,
                 ..
             } => {
+                self.needs_context |= bump_index.is_none();
                 if bump_index.is_none() && body.inputs.is_empty() && self.unanchored.is_none() {
                     self.unanchored = Some(*txid);
                 }
@@ -379,6 +466,23 @@ impl<'p> Tap<'p> {
         let unverifiable = |reason| PaymentVerdict::Unverifiable { reason };
         let roots = match verdict {
             Verdict::Valid { roots, .. } => roots,
+            Verdict::Unverifiable {
+                offset,
+                txid,
+                input,
+                check,
+            } => {
+                let check = match check {
+                    MiningCheck::Finality => "Finality",
+                    MiningCheck::CoinbaseMaturity => "CoinbaseMaturity",
+                };
+                return Err(unverifiable(UnverifiableReason::MiningContextUnavailable {
+                    offset,
+                    txid: display_hex(&txid),
+                    input,
+                    check: check.into(),
+                }));
+            }
             Verdict::Invalid {
                 offset,
                 kind,
@@ -410,7 +514,14 @@ impl<'p> Tap<'p> {
                             };
                             format!("script declined under a {bound} resource bound: {limit:?}")
                         }
-                        other => format!("{other:?}"),
+                        why @ (SpendRefusal::ParentIsTxidOnly
+                        | SpendRefusal::OutputNotAvailable { .. }
+                        | SpendRefusal::Script(_)
+                        | SpendRefusal::CreatesValue
+                        | SpendRefusal::InputValueOutOfRange
+                        | SpendRefusal::P2shOutput { .. }
+                        | SpendRefusal::NonFinal { .. }
+                        | SpendRefusal::PrematureCoinbase { .. }) => format!("{why:?}"),
                     },
                 }))
             }
@@ -463,6 +574,30 @@ impl<R: Read> Read for Tee<'_, '_, R> {
     }
 }
 
+struct TeeSource<'t, 'p, S, H: ?Sized> {
+    source: &'t mut S,
+    tap: &'t mut Tap<'p>,
+    service: &'t H,
+    context: &'t MiningContext,
+    tip_read: bool,
+}
+impl<S: AsyncByteSource, H: HeaderService + ?Sized> AsyncByteSource for TeeSource<'_, '_, S, H> {
+    async fn next_chunk(&mut self) -> std::io::Result<Option<Vec<u8>>> {
+        let chunk = self.source.next_chunk().await?;
+        if let Some(bytes) = &chunk {
+            self.tap.feed(bytes);
+        }
+        // The tap and reader cut the same elements. Acquire context once, only
+        // when an unproven transaction is ready to be folded by the reader.
+        if self.tap.needs_context && !self.tip_read {
+            let tip = self.service.mining_tip().await.unwrap_or(None);
+            *self.context.0.lock().expect("mining context lock") = tip;
+            self.tip_read = true;
+        }
+        Ok(chunk)
+    }
+}
+
 /// The reader's refusal as an [`UnverifiableReason::InvalidBeef`].
 fn invalid(refusal: Refusal) -> UnverifiableReason {
     UnverifiableReason::InvalidBeef {
@@ -500,7 +635,24 @@ fn describe_refusal(refusal: &Refusal) -> String {
         Reason::UnrelatedTransaction { txid } => {
             format!("UnrelatedTransaction {{ txid: {} }}", display_hex(txid))
         }
-        other => format!("{other:?}"),
+        reason @ (Reason::BadVersion { .. }
+        | Reason::BadVarint
+        | Reason::Truncated { .. }
+        | Reason::BadFlag { .. }
+        | Reason::TreeHeightOver64 { .. }
+        | Reason::TreeHeightZero
+        | Reason::OffsetOutsideTree { .. }
+        | Reason::NoTxidAtLevelZero
+        | Reason::MissingSibling { .. }
+        | Reason::MismatchedNode { .. }
+        | Reason::BumpIndexNamesNoBump { .. }
+        | Reason::TrailingBytes
+        | Reason::NoInputs
+        | Reason::NoOutputs
+        | Reason::UnprovenCoinbase
+        | Reason::NullOutpoint
+        | Reason::DuplicateInput
+        | Reason::ValueOutOfRange) => format!("{reason:?}"),
     };
     format!("invalid BEEF at byte {}: {data}", refusal.offset)
 }
@@ -511,7 +663,7 @@ mod tests {
     use crate::brc29::test_support::*;
     use crate::header_service::{MerkleRoot, NoService, ServiceError};
     use bsv_sdk::transaction::beef_stream::{InputRef, OutputRef, TxBody};
-    use bsv_sdk::transaction::{Beef, Kind, Transaction};
+    use bsv_sdk::transaction::{verify_stream, Beef, Kind, Transaction};
     use std::cell::RefCell;
 
     /// A header service answering `answer` at every height, recording the
@@ -553,6 +705,7 @@ mod tests {
             0,
             1000,
             Some(service),
+            None,
         )
         .await
         .unwrap()
@@ -620,6 +773,7 @@ mod tests {
                 version: 1,
                 inputs,
                 outputs: vec![OutputRef {
+                    at: 0,
                     satoshis: tx.outputs[0].satoshis.unwrap(),
                     script: located,
                 }],
@@ -774,6 +928,7 @@ mod tests {
             0,
             1000,
             Some(&headers),
+            None,
         )
         .await
         .unwrap()
@@ -1038,6 +1193,7 @@ mod tests {
                 0,
                 1000,
                 None::<&NoService>,
+                None,
             )
             .await
             .unwrap();
@@ -1055,6 +1211,7 @@ mod tests {
             0,
             1000,
             Some(&NoService),
+            None,
         )
         .await
         .unwrap();
@@ -1198,6 +1355,7 @@ mod tests {
             2,
             1000,
             Some(&Stub::root(&root)),
+            None,
         )
         .await
         .unwrap();
@@ -1225,6 +1383,7 @@ mod tests {
             0,
             1000,
             Some(&headers),
+            None,
         )
         .await
         .unwrap();
@@ -1241,6 +1400,7 @@ mod tests {
             0,
             1000,
             Some(&headers),
+            None,
         )
         .await
         .unwrap_err();
@@ -1345,6 +1505,7 @@ mod tests {
             0,
             1000,
             Some(&headers),
+            None,
         )
         .await
         .unwrap()

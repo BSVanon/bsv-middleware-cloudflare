@@ -466,21 +466,28 @@ async fn authenticate<S: SessionStorage + ?Sized>(
     let request_id = CloudflareTransport::get_request_id(&req).unwrap_or([0u8; 32]);
 
     // Extract auth message from request (also returns raw body bytes)
-    let (auth_message, request_body) = CloudflareTransport::extract_auth_message(&mut req).await?;
+    let (auth_message, request_body, digest) =
+        CloudflareTransport::extract_auth_message_digest(&mut req).await?;
 
     // The door's judgement of the general message (Request/Response-free,
     // so the whole path runs under native `cargo test`): a refusal is the
     // middleware's own 401, never an `Err` (0.4.1).
     let now_ms = current_time_ms();
-    let session =
-        match judge_general_message(&wallet, &auth_message, session_storage, options, now_ms)
-            .await?
-        {
-            GeneralJudgement::Accepted(session) => session,
-            GeneralJudgement::Refused(refusal) => {
-                return Ok(AuthResult::Response(refusal_response(&refusal)?));
-            }
-        };
+    let session = match judge_general_message_digest(
+        &wallet,
+        &auth_message,
+        session_storage,
+        options,
+        now_ms,
+        digest,
+    )
+    .await?
+    {
+        GeneralJudgement::Accepted(session) => session,
+        GeneralJudgement::Refused(refusal) => {
+            return Ok(AuthResult::Response(refusal_response(&refusal)?));
+        }
+    };
 
     // Build session info for response signing.
     // peer_nonce = the client's HANDSHAKE nonce (from session), not the per-message random nonce.
@@ -508,12 +515,13 @@ async fn authenticate<S: SessionStorage + ?Sized>(
 /// (`now_ms` is the caller's), so the whole path executes under native
 /// `cargo test` (as the payment path's `decide_payment` does, audit finding
 /// #62).
-async fn judge_general_message<S: SessionStorage + ?Sized>(
+async fn judge_general_message_digest<S: SessionStorage + ?Sized>(
     wallet: &ProtoWallet,
     message: &AuthMessage,
     session_storage: &S,
     options: &AuthMiddlewareOptions,
     now_ms: u64,
+    digest: Option<[u8; 32]>,
 ) -> Result<GeneralJudgement> {
     use GeneralJudgement::Refused;
 
@@ -567,7 +575,17 @@ async fn judge_general_message<S: SessionStorage + ?Sized>(
 
     // Verify signature: `false` and the core's "not a message for this
     // session" (unsigned) are refusals; a fault below stays an `Err`.
-    match verify_message_signature(wallet, message, &session) {
+    let signature_valid = match digest {
+        Some(digest) => core_auth::verify_message_digest(
+            wallet,
+            message,
+            &SessionBinding::from(&session),
+            digest,
+        )
+        .map_err(AuthCloudflareError::from),
+        None => verify_message_signature(wallet, message, &session),
+    };
+    match signature_valid {
         Ok(true) => {}
         Ok(false) => {
             return Ok(Refused(AuthRefusal::InvalidSignature(
@@ -1429,6 +1447,16 @@ pub fn handle_cors_preflight() -> worker::Result<Response> {
 
 #[cfg(test)]
 mod tests {
+    async fn judge_general_message<S: SessionStorage + ?Sized>(
+        wallet: &ProtoWallet,
+        message: &AuthMessage,
+        session_storage: &S,
+        options: &AuthMiddlewareOptions,
+        now_ms: u64,
+    ) -> Result<GeneralJudgement> {
+        judge_general_message_digest(wallet, message, session_storage, options, now_ms, None).await
+    }
+
     use super::*;
     use bsv_sdk::primitives::PrivateKey;
 
@@ -2465,5 +2493,31 @@ mod tests {
             settle_fn.contains("AuthRefusal::from_fault(e)?")
                 && settle_fn.contains("refusal_response(&refusal)?")
         );
+    }
+    #[tokio::test]
+    async fn digest_authenticates_without_a_payload_copy_and_keeps_replay_protection() {
+        use sha2::{Digest, Sha256};
+        let store = store_with(session_for(CLIENT_KEY_HEX, true)).await;
+        let mut message = general_message(CLIENT_KEY_HEX, CLIENT_KEY_HEX, "digest-nonce");
+        let digest: [u8; 32] = Sha256::digest(message.signing_data()).into();
+        message.payload = None;
+        let wallet = test_wallet(SERVER_KEY_HEX);
+        let answer =
+            judge_general_message_digest(&wallet, &message, &store, &door(), NOW_MS, Some(digest))
+                .await
+                .unwrap();
+        assert!(matches!(answer, GeneralJudgement::Accepted(_)));
+        let replay =
+            judge_general_message_digest(&wallet, &message, &store, &door(), NOW_MS, Some(digest))
+                .await;
+        assert!(matches!(refused(replay), AuthRefusal::Replayed));
+        let clean = store_with(session_for(CLIENT_KEY_HEX, true)).await;
+        let mut bad = digest;
+        bad[0] ^= 1;
+        let answer =
+            judge_general_message_digest(&wallet, &message, &clean, &door(), NOW_MS, Some(bad))
+                .await;
+        assert!(matches!(refused(answer), AuthRefusal::InvalidSignature(_)));
+        assert_eq!(clean.consumed_count(), 0);
     }
 }

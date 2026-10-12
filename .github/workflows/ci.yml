@@ -161,12 +161,8 @@ jobs:
       - name: Run the adapter's payment tests
         run: cargo test -p bsv-middleware-cloudflare --lib 'payment'
 
-  # Both crates package. The core publishes dry-run against crates.io. The
-  # adapter depends on the core by path AND version, and `cargo package`
-  # resolves the packaged manifest against crates.io alone (a `[patch]` does
-  # not reach it), so the adapter packages only once that core version is
-  # published: before then the step reports and passes, and release.yml
-  # dry-runs the adapter for real after the core's tag has published it.
+  # Verify both published manifests, staging the core in Cargo's temporary
+  # registry so the adapter can resolve it before the core is published.
   package:
     runs-on: ubuntu-latest
     steps:
@@ -198,12 +194,7 @@ jobs:
       - name: Dry-run publish of bsv-middleware-core
         run: cargo publish --dry-run -p bsv-middleware-core
 
-      - name: Package bsv-middleware-cloudflare (once its core version is on crates.io)
-        run: |
-          core=$(cargo metadata --no-deps --format-version 1 \
-            | jq -r '.packages[] | select(.name == "bsv-middleware-core") | .version')
-          if curl -sf -A "bsv-middleware-cloudflare ci" "https://crates.io/api/v1/crates/bsv-middleware-core/$core" >/dev/null; then
-            cargo package -p bsv-middleware-cloudflare --no-verify
-          else
-            echo "::notice::bsv-middleware-core $core is not on crates.io yet; the adapter packages after tag core-v$core publishes it (release.yml dry-runs it then)"
-          fi
+      - name: Dry-run both packages in dependency order
+        # Cargo stages the unpublished core in a temporary local registry for
+        # the adapter's package verification. Nothing is uploaded by dry-run.
+        run: cargo publish --dry-run --workspace

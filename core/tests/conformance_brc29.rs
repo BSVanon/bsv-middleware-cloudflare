@@ -120,6 +120,7 @@ async fn run_case(case: &Value) -> (Result<PaymentVerdict, PaymentFault>, Vec<u3
             index,
             required,
             None::<&NoService>,
+            None,
         )
         .await;
         return (answer, Vec::new());
@@ -141,9 +142,53 @@ async fn run_case(case: &Value) -> (Result<PaymentVerdict, PaymentFault>, Vec<u3
         index,
         required,
         Some(&service),
+        None,
     )
     .await;
-    (answer, asked.into_inner())
+    let primary_asked = asked.borrow().clone();
+    struct Chunks<'a> {
+        bytes: &'a [u8],
+        n: usize,
+    }
+    impl bsv_middleware_core::AsyncByteSource for Chunks<'_> {
+        async fn next_chunk(&mut self) -> std::io::Result<Option<Vec<u8>>> {
+            if self.bytes.is_empty() {
+                return Ok(None);
+            }
+            let n = self.n.min(self.bytes.len());
+            let out = self.bytes[..n].to_vec();
+            self.bytes = &self.bytes[n..];
+            Ok(Some(out))
+        }
+    }
+    for n in [1, 7] {
+        for limit in [None, Some(1_000_000)] {
+            let result = bsv_middleware_core::verify_brc29_payment_stream(
+                server_key,
+                sender,
+                prefix,
+                suffix,
+                &mut Chunks { bytes: &tx, n },
+                index,
+                required,
+                Some(&service),
+                limit,
+            )
+            .await;
+            let word = result.map(|v| match v {
+                Ok(v) => PaymentVerdict::Verified {
+                    satoshis: v.satoshis,
+                },
+                Err(v) => v,
+            });
+            assert_eq!(
+                word_of(&word),
+                word_of(&answer),
+                "chunk {n}, limit {limit:?}"
+            );
+        }
+    }
+    (answer, primary_asked)
 }
 
 /// Every txid a case's BEEF names: the subject's, and each input's source
@@ -400,4 +445,41 @@ fn the_ruled_cases_are_unverifiable() {
         assert!(case["header_service"]["lookup"].is_null());
         assert!(case["crate_result"].is_null(), "{name}: the owner's case");
     }
+}
+
+#[tokio::test]
+async fn failing_non_send_source_is_a_host_fault() {
+    struct Broken(std::rc::Rc<()>);
+    impl bsv_middleware_core::AsyncByteSource for Broken {
+        async fn next_chunk(&mut self) -> std::io::Result<Option<Vec<u8>>> {
+            let _ = &self.0;
+            Err(std::io::Error::new(
+                std::io::ErrorKind::ConnectionReset,
+                "test source disconnected",
+            ))
+        }
+    }
+    let doc: Value = serde_json::from_str(VECTORS).unwrap();
+    let case = doc["cases"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| s(c, "name") == "exact-amount")
+        .unwrap();
+    let service = LookupFn(|_| std::future::ready(Ok(Some(MerkleRoot::new("unused")))));
+    let result = bsv_middleware_core::verify_brc29_payment_stream(
+        s(case, "server_private_key"),
+        s(case, "sender_identity_key"),
+        s(case, "derivation_prefix"),
+        s(case, "derivation_suffix"),
+        &mut Broken(std::rc::Rc::new(())),
+        0,
+        1000,
+        Some(&service),
+        Some(1_000_000),
+    )
+    .await;
+    assert!(
+        matches!(result,Err(PaymentFault::Source(message)) if message.contains("test source disconnected"))
+    );
 }

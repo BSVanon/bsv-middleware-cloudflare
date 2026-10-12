@@ -46,15 +46,57 @@ Error codes, HTTP statuses, and all `x-bsv-auth-*` / `x-bsv-payment-*` header na
 ## Install
 
 ```toml
-bsv-middleware-cloudflare = "0.5.2"
+bsv-middleware-cloudflare = "0.6.0"
 # Runtime-free hosts:
-bsv-middleware-core = "0.2.2"
+bsv-middleware-core = "0.3.0"
 ```
 
-Both crates require bsv-rs 0.4.5 or later in 0.4.x, with no API change. They set no work or memory bound.
+Both crates require bsv-rs 0.5.0 or later in 0.5.x (caret). Work limits are optional, default `None`.
 A local evaluator decline names the resource and input as payer-side `Unverifiable` (`SpendRefused`),
 400 `ERR_PAYMENT_INVALID` in the adapter. A lone hashed leaf at a nonzero offset is refused by the
 SDK's `MerklePath`, with a payer-side refusal naming the offset. See [the migration](CHANGELOG.md).
+
+## Sources, multipart payments and work budgets
+
+Core callers add `work_limit: None` to `verify_brc29_payment` and
+`verify_brc29_payment_verified`. `verify_brc29_payment_stream` takes an
+`AsyncByteSource`; `SliceSource` is the bounded-chunk slice wrapper.
+Implement `HeaderService::mining_tip` for finality and coinbase maturity.
+Missing context is a server-side `MiningContextUnavailable`, never a guessed verdict.
+
+The adapter keeps its existing verify signatures with no budget. Read
+`payment_work_limit(&env)?` once and pass it to `verify_brc29_payment_budgeted`
+or `verify_brc29_payment_source`. `PAYMENT_WORK_LIMIT` is optional: absent or
+blank means no bound, a positive decimal u64 bounds each unproven input,
+and `0` or a non-number is `BadWorkLimit`, 500 `ERR_SERVER_MISCONFIGURED`.
+The fleet uses `1000000` units per input; a one-input P2PKH witness needs 490.
+A resource decline is payer-side, 400 `ERR_PAYMENT_INVALID`, with the quote kept.
+The bound is per input, not per request. The Worker's configured CPU cap bounds
+total request work (Paid defaults to 30 seconds); this release adds no request clock.
+
+After authentication, use `split_multipart_payment(&req, body)` and feed
+`payment.transaction()` to the source verifier with `payment.prefix()` and
+`payment.suffix()`. The original multipart body moves into `PaymentPart`;
+only the handler payload is copied out, and base64 decodes in 3 KB chunks.
+The x402 helper switches above **8,192 bytes of payment JSON**, when multipart
+is advertised. It sends an `x-bsv-payment` JSON part and an optional binary
+`body` part. This is the helper's threshold, replacing the design's approximate
+16 KB. The old `prepare_multipart_payment` remains available, deprecated.
+BRC-104 authenticates the entire body before payment verification; its digest
+path holds one body copy. Signed refusal payloads keep their existing shape.
+
+`UrlHeaderService` uses `/findChainTipHeaderHex`, `/getChain`, and up to ten
+`/findHeaderHexForBlockHash?hash=...` lookups to compute the tip's median time
+past from its ancestry. Mainnet and testnet activation heights follow the SV
+node's chain parameters. No candidate block time is guessed before CSV:
+pre-CSV time locks decline without explicit context from a custom service.
+
+Native size witness: the 64,004,742-byte body verifies, but the core's
+incremental peak is 7,109,677 bytes. The SDK reader alone uses 7,013,135 bytes.
+The design's below-4-MB target is therefore not met on bsv-rs 0.5.0. The
+ignored `stream_memory` test retains that assertion so the missed gate stays
+visible; it requires a dependency change or an owner-approved revised bound.
+No Cloudflare 30 MB multipart memory/control run has been made in this crate lane.
 
 ## Quick start
 
@@ -182,7 +224,7 @@ proves, before any wallet call, that the payment *pays this server correctly* an
 (`VerifiedPayment { satoshis, txid }`), so a host records the payment without parsing the BEEF a second time.
 
 **A BEEF of any size.** A valid payment is never refused for its size or its counts (the owner's ruling of
-2026-10-09): the payment is read once through the streaming reader of bsv-rs 0.4 (0.4.5 at least), one element in
+2026-10-09): the payment is read once through the streaming reader of bsv-rs 0.5 (0.5.0 at least), one element in
 hand, and a refusal of the bytes names the offset and the reader's kind. This crate carries no limit, no count bound
 and no 413.
 
@@ -265,7 +307,7 @@ after `verify_brc29_payment` succeeds and before internalizing; `release_payment
 pre-internalize failure.
 
 ```toml
-bsv-middleware-cloudflare = { version = "0.5.2", features = ["d1-claims"] }
+bsv-middleware-cloudflare = { version = "0.6.0", features = ["d1-claims"] }
 ```
 
 ## Session storage backends

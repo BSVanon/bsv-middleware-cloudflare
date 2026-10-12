@@ -6,6 +6,7 @@
 //! `None` is [`PaymentVerdict::NoHeaderService`](crate::PaymentVerdict::NoHeaderService),
 //! fail closed, before any other check.
 
+pub use bsv_sdk::transaction::beef_stream::ChainTip;
 use std::fmt;
 use std::future::Future;
 
@@ -87,6 +88,11 @@ impl std::error::Error for ServiceError {}
 /// imposed, so a single-threaded wasm host and a multi-threaded native host
 /// both fit); the verifier is generic over the service, never boxed.
 pub trait HeaderService {
+    /// Active tip and network context. Absence declines contextual checks.
+    fn mining_tip(&self) -> impl Future<Output = Result<Option<ChainTip>, ServiceError>> {
+        std::future::ready(Ok(None))
+    }
+
     /// The merkle root of the block at `height`.
     fn merkle_root(
         &self,
@@ -95,6 +101,10 @@ pub trait HeaderService {
 }
 
 impl<H: HeaderService + ?Sized> HeaderService for &H {
+    fn mining_tip(&self) -> impl Future<Output = Result<Option<ChainTip>, ServiceError>> {
+        (**self).mining_tip()
+    }
+
     fn merkle_root(
         &self,
         height: u32,

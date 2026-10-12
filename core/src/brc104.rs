@@ -310,6 +310,27 @@ pub fn write_varint(value: i64) -> Vec<u8> {
     }
 }
 
+/// SHA-256 of the exact BRC-104 request payload without copying the body.
+pub fn request_payload_digest(
+    request_id: &[u8; 32],
+    method: &str,
+    path: &str,
+    search: &str,
+    headers: &[(String, String)],
+    body: &[u8],
+) -> [u8; 32] {
+    use sha2::{Digest, Sha256};
+    let mut prefix = build_request_payload(request_id, method, path, search, headers, &[]);
+    if !body.is_empty() {
+        prefix.truncate(prefix.len() - write_varint(-1).len());
+        prefix.extend(write_varint(body.len() as i64));
+    }
+    let mut hash = Sha256::new();
+    hash.update(prefix);
+    hash.update(body);
+    hash.finalize().into()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -636,5 +657,18 @@ mod tests {
             auth_headers::REQUESTED_CERTIFICATES,
             "x-bsv-auth-requested-certificates"
         );
+    }
+    #[test]
+    fn incremental_request_digest_matches_wire_payload() {
+        use sha2::{Digest, Sha256};
+        let headers = vec![("content-type".into(), "multipart/form-data".into())];
+        for size in [0, 1, 252, 253, 65535, 65536, 1_000_000] {
+            let body = vec![7; size];
+            let payload = build_request_payload(&[3; 32], "POST", "/pay", "?q=1", &headers, &body);
+            assert_eq!(
+                request_payload_digest(&[3; 32], "POST", "/pay", "?q=1", &headers, &body),
+                <[u8; 32]>::from(Sha256::digest(payload))
+            );
+        }
     }
 }

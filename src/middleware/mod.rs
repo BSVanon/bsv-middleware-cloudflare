@@ -13,6 +13,7 @@ pub use auth::{
     sign_response, AuthMiddlewareOptions, AuthResult, AuthSession, LaneAuth, LaneAuthResult,
     SessionLaneOptions,
 };
+#[allow(deprecated)]
 pub use multipart::prepare_multipart_payment;
 #[allow(deprecated)] // re-exported for backward compatibility
 pub use payment::process_payment;

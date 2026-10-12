@@ -1,6 +1,6 @@
 //! Multipart form-data payment transport for BRC-29.
 //!
-//! When a BSV payment transaction is too large for HTTP headers (~16KB limit),
+//! When a BSV payment transaction is above the x402 helper's 8,192-byte payment JSON threshold,
 //! the client sends it as a `multipart/form-data` body part instead. This module
 //! provides [`prepare_multipart_payment`] which agents call after auth verification
 //! and before payment processing.
@@ -9,7 +9,7 @@
 //! - `x-bsv-payment`: payment JSON (same format as the header value)
 //! - `body`: the original request payload with its own Content-Type
 //!
-//! Auth verification is unaffected — it operates on the raw multipart body bytes
+//! Auth verification is unaffected: it operates on the raw multipart body bytes
 //! before this extraction happens.
 
 use crate::error::{AuthCloudflareError, Result};
@@ -22,13 +22,190 @@ struct MultipartPart {
     bytes: Vec<u8>,
 }
 
+/// Authenticated payload and an optional payment retaining the original body.
+pub struct MultipartPayment {
+    /// The handler's payload. Non-multipart requests return their body here.
+    pub body: Vec<u8>,
+    /// Payment JSON held by span in the original authenticated body.
+    pub payment: Option<PaymentPart>,
+}
+
+/// One owned multipart body and the transaction's base64 span, without a BEEF copy.
+pub struct PaymentPart {
+    bytes: Vec<u8>,
+    transaction_span: std::ops::Range<usize>,
+    prefix: String,
+    suffix: String,
+}
+
+impl PaymentPart {
+    /// BRC-29 derivation prefix.
+    pub fn prefix(&self) -> &str {
+        &self.prefix
+    }
+    /// BRC-29 derivation suffix.
+    pub fn suffix(&self) -> &str {
+        &self.suffix
+    }
+    /// Decode bounded chunks directly into the reader, never a whole decoded BEEF.
+    pub fn transaction(&self) -> PaymentTransaction<'_> {
+        PaymentTransaction {
+            encoded: &self.bytes[self.transaction_span.clone()],
+        }
+    }
+}
+
+/// Base64 source borrowed from an authenticated payment part.
+pub struct PaymentTransaction<'a> {
+    encoded: &'a [u8],
+}
+impl bsv_middleware_core::AsyncByteSource for PaymentTransaction<'_> {
+    async fn next_chunk(&mut self) -> std::io::Result<Option<Vec<u8>>> {
+        use base64::Engine;
+        if self.encoded.is_empty() {
+            return Ok(None);
+        }
+        let n = self.encoded.len().min(4096);
+        let chunk = base64::engine::general_purpose::STANDARD
+            .decode(&self.encoded[..n])
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        self.encoded = &self.encoded[n..];
+        Ok(Some(chunk))
+    }
+}
+
+/// Split after authentication. The original body moves into the payment part.
+/// The x402 helper switches to this format above 8,192 bytes of payment JSON.
+pub fn split_multipart_payment(req: &Request, body: Vec<u8>) -> Result<MultipartPayment> {
+    let content_type = req
+        .headers()
+        .get("content-type")
+        .map_err(|e| AuthCloudflareError::TransportError(e.to_string()))?
+        .unwrap_or_default();
+    split_content_type(&content_type, body)
+}
+
+fn malformed(message: impl Into<String>) -> AuthCloudflareError {
+    AuthCloudflareError::MalformedPayment(message.into())
+}
+
+fn split_content_type(content_type: &str, bytes: Vec<u8>) -> Result<MultipartPayment> {
+    if !content_type
+        .split(';')
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .eq_ignore_ascii_case("multipart/form-data")
+    {
+        return Ok(MultipartPayment {
+            body: bytes,
+            payment: None,
+        });
+    }
+    let boundary = extract_boundary(content_type)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| malformed("multipart boundary missing"))?;
+    let parts = multipart_spans(&bytes, &boundary)?;
+    let mut payment_span = None;
+    let mut body_span = None;
+    for (name, span) in parts {
+        let target = match name.as_str() {
+            "x-bsv-payment" => &mut payment_span,
+            "body" => &mut body_span,
+            _ => return Err(malformed("unexpected multipart part")),
+        };
+        if target.replace(span).is_some() {
+            return Err(malformed("duplicate multipart part"));
+        }
+    }
+    let body = body_span.map(|s| bytes[s].to_vec()).unwrap_or_default();
+    let span = payment_span.ok_or_else(|| malformed("x-bsv-payment part missing"))?;
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Fields<'a> {
+        derivation_prefix: String,
+        derivation_suffix: String,
+        #[serde(borrow)]
+        transaction: &'a str,
+    }
+    // Borrowed str rejects JSON escapes in transaction instead of allocating it.
+    let fields: Fields<'_> = serde_json::from_slice(&bytes[span])
+        .map_err(|e| malformed(format!("payment JSON: {e}")))?;
+    let start = fields.transaction.as_ptr() as usize - bytes.as_ptr() as usize;
+    let end = start + fields.transaction.len();
+    // Validate before exposing a source: malformed payment bytes remain payer-side.
+    use base64::Engine;
+    let encoded = fields.transaction.as_bytes();
+    if !encoded.len().is_multiple_of(4) {
+        return Err(malformed("invalid transaction base64 length"));
+    }
+    for (i, chunk) in encoded.chunks(4096).enumerate() {
+        if i * 4096 + chunk.len() < encoded.len() && chunk.contains(&b'=') {
+            return Err(malformed("base64 padding before end"));
+        }
+        base64::engine::general_purpose::STANDARD
+            .decode(chunk)
+            .map_err(|e| malformed(format!("transaction base64: {e}")))?;
+    }
+    let prefix = fields.derivation_prefix;
+    let suffix = fields.derivation_suffix;
+    Ok(MultipartPayment {
+        body,
+        payment: Some(PaymentPart {
+            bytes,
+            transaction_span: start..end,
+            prefix,
+            suffix,
+        }),
+    })
+}
+
+fn multipart_spans(body: &[u8], boundary: &str) -> Result<Vec<(String, std::ops::Range<usize>)>> {
+    let first = format!("--{boundary}\r\n");
+    if !body.starts_with(first.as_bytes()) {
+        return Err(malformed("initial multipart boundary missing"));
+    }
+    let marker = format!("\r\n--{boundary}");
+    let mut pos = first.len();
+    let mut parts = Vec::new();
+    loop {
+        let header_end = find_bytes(body, b"\r\n\r\n", pos)
+            .ok_or_else(|| malformed("multipart headers truncated"))?;
+        let headers = std::str::from_utf8(&body[pos..header_end])
+            .map_err(|_| malformed("invalid multipart headers"))?;
+        let name =
+            extract_part_name(headers).ok_or_else(|| malformed("multipart part name missing"))?;
+        let start = header_end + 4;
+        let mut search = start;
+        let next = loop {
+            let next = find_bytes(body, marker.as_bytes(), search)
+                .ok_or_else(|| malformed("multipart closing boundary missing"))?;
+            let tail = next + marker.len();
+            if body.get(tail..tail + 2) == Some(b"\r\n") || body.get(tail..tail + 2) == Some(b"--")
+            {
+                break next;
+            }
+            search = next + 1;
+        };
+        parts.push((name, start..next));
+        let tail = next + marker.len();
+        if body.get(tail..tail + 2) == Some(b"--") {
+            if !matches!(&body[tail + 2..], b"" | b"\r\n") {
+                return Err(malformed("bytes after closing multipart boundary"));
+            }
+            return Ok(parts);
+        }
+        pos = tail + 2;
+    }
+}
+
 // ─── Public API ──────────────────────────────────────────────────────
 
 /// Prepare payment extraction for a request that may use multipart transport.
 ///
 /// If the request `Content-Type` is `multipart/form-data`:
 /// 1. Parses the body to extract the `x-bsv-payment` part (payment JSON)
-/// 2. Returns `(body_bytes, Some(payment_json))` — the clean payload and payment string
+/// 2. Returns `(body_bytes, Some(payment_json))`: the clean payload and payment string
 ///
 /// If the request is NOT multipart, returns `(body, None)`.
 ///
@@ -39,6 +216,7 @@ struct MultipartPart {
 /// let (request_body, multipart_payment) = prepare_multipart_payment(&req, request_body)?;
 /// // Use multipart_payment.or_else(|| header read) for payment extraction
 /// ```
+#[deprecated(note = "use split_multipart_payment to retain one body and stream the transaction")]
 pub fn prepare_multipart_payment(
     req: &Request,
     body: Vec<u8>,
@@ -83,7 +261,7 @@ pub fn prepare_multipart_payment(
         }
     }
 
-    // No body part — return empty (payment-only request).
+    // No body part: return empty (payment-only request).
     Ok((Vec::new(), payment_json))
 }
 
@@ -106,7 +284,7 @@ fn extract_boundary(content_type: &str) -> Option<String> {
 ///
 /// Minimal RFC 7578 parser for a fixed 2-part format. Splits by boundary,
 /// extracts Content-Disposition name and Content-Type for each part.
-/// No streaming, no external crates — works in CF Workers Wasm.
+/// No streaming, no external crates: works in CF Workers Wasm.
 fn parse_multipart(body: &[u8], boundary: &str) -> Result<Vec<(String, MultipartPart)>> {
     let delimiter = format!("--{}", boundary);
     let delimiter_bytes = delimiter.as_bytes();
@@ -466,5 +644,75 @@ mod tests {
             payment_json
         );
         assert_eq!(parts[1].1.bytes, audio_bytes);
+    }
+    // Exact wire shape of x402 lib/payment.py::build_multipart_body.
+    fn helper_body(payment: &str, payload: Option<&[u8]>) -> (String, Vec<u8>) {
+        let boundary = "----BsvPayment0123456789abcdef";
+        let mut body = format!("--{boundary}\r\nContent-Disposition: form-data; name=\"x-bsv-payment\"\r\nContent-Type: application/json\r\n\r\n{payment}\r\n").into_bytes();
+        if let Some(payload) = payload.filter(|p| !p.is_empty()) {
+            body.extend(format!("--{boundary}\r\nContent-Disposition: form-data; name=\"body\"\r\nContent-Type: application/octet-stream\r\n\r\n").as_bytes());
+            body.extend(payload);
+            body.extend(b"\r\n");
+        }
+        body.extend(format!("--{boundary}--\r\n").as_bytes());
+        (format!("multipart/form-data; boundary={boundary}"), body)
+    }
+
+    #[tokio::test]
+    async fn helper_exact_shape_retains_one_body_and_streams_base64() {
+        use base64::Engine;
+        use bsv_middleware_core::AsyncByteSource;
+        let raw: Vec<u8> = (0..20_000).map(|i| (i % 256) as u8).collect();
+        let encoded = base64::engine::general_purpose::STANDARD.encode(&raw);
+        // Deliberately reorder the JSON fields.
+        let payment = format!(
+            r#"{{"transaction":"{encoded}","derivationSuffix":"s","derivationPrefix":"p"}}"#
+        );
+        assert!(payment.len() > 8192);
+        for payload in [None, Some(&b"\xff\x00binary"[..])] {
+            let (ct, bytes) = helper_body(&payment, payload);
+            let original = bytes.as_ptr();
+            let split = split_content_type(&ct, bytes).unwrap();
+            assert_eq!(split.body, payload.unwrap_or_default());
+            let part = split.payment.unwrap();
+            assert_eq!(
+                part.bytes.as_ptr(),
+                original,
+                "the original body moves without cloning"
+            );
+            assert_eq!((part.prefix(), part.suffix()), ("p", "s"));
+            let mut source = part.transaction();
+            let mut decoded = Vec::new();
+            while let Some(chunk) = source.next_chunk().await.unwrap() {
+                assert!(chunk.len() <= 3072);
+                decoded.extend(chunk);
+            }
+            assert_eq!(decoded, raw);
+        }
+    }
+
+    #[test]
+    fn malformed_payment_stays_payer_side() {
+        for json in [
+            r#"{"derivationPrefix":"p","derivationSuffix":"s","transaction":"AA\u0041="}"#,
+            r#"{"derivationPrefix":"p","derivationSuffix":"s","transaction":"!!!!"}"#,
+            r#"{"derivationPrefix":"p","derivationSuffix":"s","transaction":"AA==AAAA"}"#,
+            r#"{"derivationPrefix":"p","derivationSuffix":"s","transaction":"AA==","transaction":"AA=="}"#,
+        ] {
+            let (ct, body) = helper_body(json, None);
+            assert!(matches!(
+                split_content_type(&ct, body),
+                Err(AuthCloudflareError::MalformedPayment(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn binary_boundary_near_match_and_truncation() {
+        let json = r#"{"derivationPrefix":"p","derivationSuffix":"s","transaction":"AA=="}"#;
+        let payload = b"\r\n------BsvPayment0123456789abcdefX\xff";
+        let (ct, body) = helper_body(json, Some(payload));
+        assert_eq!(split_content_type(&ct, body.clone()).unwrap().body, payload);
+        assert!(split_content_type(&ct, body[..body.len() - 8].to_vec()).is_err());
     }
 }

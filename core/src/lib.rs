@@ -52,7 +52,7 @@
 //!
 //! ## A BEEF of any size
 //!
-//! No limit, no count and no size bound lives here (the posture of
+//! No count or size bound lives here (the posture of
 //! 2026-10-09): a valid payment of any size is read, one element at a time,
 //! and a refusal is for invalid bytes only, named by offset and kind.
 //!
@@ -80,9 +80,10 @@ pub mod verdict;
 pub use auth::{AuthError, SessionBinding};
 pub use brc104::{auth_headers, HttpRequestData, HttpResponseData};
 pub use brc29::{expected_locking_script, verify_payment_output, BRC29_PROTOCOL_ID};
-pub use header_service::{HeaderService, LookupFn, MerkleRoot, NoService, ServiceError};
+pub use header_service::{ChainTip, HeaderService, LookupFn, MerkleRoot, NoService, ServiceError};
 pub use payment_verify::{
-    verify_brc29_payment, verify_brc29_payment_structural_only, verify_brc29_payment_verified,
+    verify_brc29_payment, verify_brc29_payment_stream, verify_brc29_payment_structural_only,
+    verify_brc29_payment_verified, AsyncByteSource, SliceSource,
 };
 pub use spv::{check_roots, decide_root, RootDecision, RootsOutcome};
 pub use store::{ClaimStore, MemoryStore, PaymentNonceStore, StoreError, PAYMENT_NONCE_SCOPE};
