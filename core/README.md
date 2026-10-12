@@ -53,12 +53,25 @@ past from its ancestry. Mainnet and testnet activation heights follow the SV
 node's chain parameters. No candidate block time is guessed before CSV:
 pre-CSV time locks decline without explicit context from a custom service.
 
-Native size witness: the 64,004,742-byte body verifies, but the core's
-incremental peak is 7,109,677 bytes. The SDK reader alone uses 7,013,135 bytes.
-The design's below-4-MB target is therefore not met on bsv-rs 0.5.0. The
-ignored `stream_memory` test retains that assertion so the missed gate stays
-visible; it requires a dependency change or an owner-approved revised bound.
-No Cloudflare 30 MB multipart memory/control run has been made in this crate lane.
+Native release memory baseline on bsv-rs 0.5.0 (bytes):
+
+| Unproven hops | BEEF body | Adapter/core payment path peak | SDK reader alone peak |
+| --- | ---: | ---: | ---: |
+| 16 | 16,001,286 | 7,080,245 | 6,984,599 |
+| 64 | 64,004,742 | 7,109,677 | 7,012,711 |
+| 128 | 128,009,350 | 7,114,117 | 7,012,711 |
+
+All bodies verify. These are incremental native heap peaks above the caller's
+already-owned body, not total Worker memory or a multipart runtime measurement.
+Each hop has the same 1,000,005-byte unlocking script; the payment path receives
+64 KiB chunks. All peaks are below 8 MB, and the largest body's peaks are within
+0.5 percent of the smallest's (the test requires within 10 percent for both paths).
+The release witness proves independence from body size at these points; its floor
+is the largest transaction plus reader/index overhead. This replaces the design's
+guessed below-4-MB bound under the captain's ruling. The prior lane measured the
+64-hop SDK peak as 7,013,135 bytes; this witness samples before the validity assertion.
+The 30 MB multipart `wrangler dev` WrongScript witness and adapter 0.5.2 control
+are deferred to test-agent in the fleet wave.
 
 ## What it decides
 

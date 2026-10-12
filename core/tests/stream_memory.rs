@@ -1,4 +1,19 @@
 //! Release size witness: the verifier retains elements and an index, not the BEEF.
+//!
+//! Native release baseline on bsv-rs 0.5.0, in bytes:
+//! | Hops | Body | Adapter/core payment path | SDK reader alone |
+//! | --- | ---: | ---: | ---: |
+//! | 16 | 16,001,286 | 7,080,245 | 6,984,599 |
+//! | 64 | 64,004,742 | 7,109,677 | 7,012,711 |
+//! | 128 | 128,009,350 | 7,114,117 | 7,012,711 |
+//!
+//! Peaks exclude the already-owned body and fixture construction. Each hop uses
+//! the same 1,000,005-byte unlocking script; SliceSource feeds 64 KiB chunks.
+//! Both paths must peak below 8 MB at every point, and their largest-body peaks
+//! must be within 10 percent of their smallest-body peaks. This witnesses body
+//! size independence, with the largest transaction as the floor, replacing the
+//! design's guessed 4 MB bound under the captain's ruling. The previous lane's
+//! 64-hop SDK peak was 7,013,135 bytes; we sample before the validity assertion.
 use bsv_middleware_core::{verify_brc29_payment_stream, LookupFn, MerkleRoot, SliceSource};
 use bsv_sdk::primitives::{sha256d, Writer};
 use std::alloc::{GlobalAlloc, Layout, System};
@@ -54,8 +69,8 @@ fn transaction(parent: [u8; 32], unlock: &[u8], lock: &[u8]) -> Vec<u8> {
 }
 
 #[tokio::test]
-#[ignore = "run in release for the 64 MB allocation witness"]
-async fn sixty_four_megabytes_in_64k_chunks_peak_below_four_megabytes() {
+#[ignore = "run in release for the 16/64/128 MB allocation witness"]
+async fn body_size_independent_peak_in_64k_chunks() {
     let doc: serde_json::Value =
         serde_json::from_str(include_str!("../conformance/brc29-payment-vectors.json")).unwrap();
     let case = doc["cases"]
@@ -77,66 +92,84 @@ async fn sixty_four_megabytes_in_64k_chunks_peak_below_four_megabytes() {
     .unwrap();
     let parent = transaction([0xaa; 32], &[], &[0x75, 0x51]);
     let root = sha256d(&parent);
-    let mut previous = root;
-    let mut w = Writer::new();
-    w.write_u32_le(0xefbe_0002)
-        .write_var_int(1)
-        .write_var_int(800_000)
-        .write_bytes(&[1, 1, 0, 2])
-        .write_bytes(&root)
-        .write_var_int(65)
-        .write_bytes(&[1, 0])
-        .write_bytes(&parent);
-    let mut unlock = vec![0x4e];
-    unlock.extend((1_000_000u32).to_le_bytes());
-    unlock.resize(1_000_005, 7);
-    for i in 0..64 {
-        let lock = if i == 63 {
-            derived.as_slice()
-        } else {
-            &[0x75, 0x51]
-        };
-        let raw = transaction(previous, &unlock, lock);
-        previous = sha256d(&raw);
-        w.write_u8(0).write_bytes(&raw);
-    }
-    let bytes = w.into_bytes();
-    drop(unlock);
     let mut shown = root;
     shown.reverse();
     let root_hex = hex::encode(shown);
     let service = LookupFn(|_| std::future::ready(Ok(Some(MerkleRoot::new(root_hex.clone())))));
-    let baseline_sdk = LIVE.load(Ordering::Relaxed);
-    PEAK.store(baseline_sdk, Ordering::Relaxed);
-    let sdk = bsv_sdk::transaction::verify_stream(
-        bytes.as_slice(),
-        bsv_sdk::transaction::beef_stream::HeadersFn(|_: u64, _: &[u8; 32]| true),
-        None,
-    )
-    .unwrap();
-    assert!(sdk.is_valid());
-    let sdk_peak = PEAK.load(Ordering::Relaxed) - baseline_sdk;
-    println!("SDK_STREAM_MEMORY incremental_peak_bytes={sdk_peak}");
-    let baseline = LIVE.load(Ordering::Relaxed);
-    PEAK.store(baseline, Ordering::Relaxed);
-    let result = verify_brc29_payment_stream(
-        get("server_private_key"),
-        get("sender_identity_key"),
-        get("derivation_prefix"),
-        get("derivation_suffix"),
-        &mut SliceSource::new(&bytes),
-        0,
-        1000,
-        Some(&service),
-        None,
-    )
-    .await
-    .unwrap();
-    let peak = PEAK.load(Ordering::Relaxed) - baseline;
-    assert!(result.is_ok(), "{result:?}");
-    println!(
-        "STREAM_MEMORY body_bytes={} incremental_peak_bytes={peak}",
-        bytes.len()
+    let mut peaks = Vec::with_capacity(3);
+    for hops in [16, 64, 128] {
+        let mut previous = root;
+        let mut w = Writer::new();
+        w.write_u32_le(0xefbe_0002)
+            .write_var_int(1)
+            .write_var_int(800_000)
+            .write_bytes(&[1, 1, 0, 2])
+            .write_bytes(&root)
+            .write_var_int(hops + 1)
+            .write_bytes(&[1, 0])
+            .write_bytes(&parent);
+        let mut unlock = vec![0x4e];
+        unlock.extend((1_000_000u32).to_le_bytes());
+        unlock.resize(1_000_005, 7);
+        for i in 0..hops {
+            let lock = if i == hops - 1 {
+                derived.as_slice()
+            } else {
+                &[0x75, 0x51]
+            };
+            let raw = transaction(previous, &unlock, lock);
+            previous = sha256d(&raw);
+            w.write_u8(0).write_bytes(&raw);
+        }
+        let bytes = w.into_bytes();
+        drop(unlock);
+        // Exclude the caller's already-owned body and fixture construction.
+        let baseline_sdk = LIVE.load(Ordering::Relaxed);
+        PEAK.store(baseline_sdk, Ordering::Relaxed);
+        let sdk = bsv_sdk::transaction::verify_stream(
+            bytes.as_slice(),
+            bsv_sdk::transaction::beef_stream::HeadersFn(|_: u64, _: &[u8; 32]| true),
+            None,
+        )
+        .unwrap();
+        let sdk_peak = PEAK.load(Ordering::Relaxed) - baseline_sdk;
+        assert!(sdk.is_valid());
+        drop(sdk);
+        let baseline = LIVE.load(Ordering::Relaxed);
+        PEAK.store(baseline, Ordering::Relaxed);
+        let result = verify_brc29_payment_stream(
+            get("server_private_key"),
+            get("sender_identity_key"),
+            get("derivation_prefix"),
+            get("derivation_suffix"),
+            &mut SliceSource::new(&bytes),
+            0,
+            1000,
+            Some(&service),
+            None,
+        )
+        .await
+        .unwrap();
+        let peak = PEAK.load(Ordering::Relaxed) - baseline;
+        assert!(result.is_ok(), "{result:?}");
+        println!(
+            "STREAM_MEMORY hops={hops} body_bytes={} incremental_peak_bytes={peak} sdk_peak_bytes={sdk_peak}",
+            bytes.len()
+        );
+        peaks.push((peak, sdk_peak));
+    }
+    for &(peak, sdk_peak) in &peaks {
+        assert!(peak < 8_000_000, "payment path peak {peak}");
+        assert!(sdk_peak < 8_000_000, "SDK peak {sdk_peak}");
+    }
+    let (smallest, sdk_smallest) = peaks[0];
+    let (largest, sdk_largest) = peaks[2];
+    assert!(
+        largest.abs_diff(smallest) * 10 <= smallest,
+        "payment path grew: smallest {smallest}, largest {largest}"
     );
-    assert!(peak < 4 * 1024 * 1024, "peak {peak}");
+    assert!(
+        sdk_largest.abs_diff(sdk_smallest) * 10 <= sdk_smallest,
+        "SDK grew: smallest {sdk_smallest}, largest {sdk_largest}"
+    );
 }
