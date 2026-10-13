@@ -977,6 +977,45 @@ mod tests {
         );
     }
 
+    /// A non-canonical BUMP count in an otherwise valid payment is the
+    /// reader's BadVarint, before any header lookup, including the opt-out.
+    #[tokio::test]
+    async fn non_canonical_varint_is_bad_varint_at_the_payment_door() {
+        let parent = proven_parent(OP_TRUE.to_vec(), 1000);
+        let subject = spending(&parent, &[(1000, our_script_bytes())]);
+        let (mut beef, root) = beef_of(&[&parent, &subject], true);
+        assert_eq!(
+            full(&beef, &Stub::root(&root)).await,
+            PaymentVerdict::Verified { satoshis: 1000 }
+        );
+        assert_eq!(beef[4], 1);
+        beef.splice(4..5, [0xfd, 1, 0]);
+        assert_eq!(
+            verify_stream(&beef[..], RootsAskedAfter, None).unwrap(),
+            Verdict::Invalid {
+                offset: 4,
+                kind: Kind::BadVarint,
+                reason: Reason::BadVarint
+            }
+        );
+        let headers = Stub::root(&root);
+        for verdict in [full(&beef, &headers).await, structural(&beef)] {
+            let reason = reason_of(&verdict);
+            assert_eq!(
+                *reason,
+                UnverifiableReason::InvalidBeef {
+                    offset: 4,
+                    kind: "BadVarint".into(),
+                    reason: "invalid BEEF at byte 4: BadVarint".into(),
+                }
+            );
+            assert!(!reason.is_server_side());
+            assert!(reason.to_string().contains("BadVarint"));
+            assert!(reason.to_string().contains("offset 4"));
+        }
+        assert!(headers.asked().is_empty());
+    }
+
     // ---- the no-root class (ruled 2026-10-09): the payer's side ----
 
     /// What the reader itself says of an unproven transaction with no

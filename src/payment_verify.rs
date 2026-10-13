@@ -1439,6 +1439,34 @@ mod tests {
         );
     }
 
+    /// Canonical 0.6.0 reading refuses a non-canonical BUMP count as the
+    /// payer's signed 400 and preserves the reason's Display, with no lookup.
+    #[tokio::test]
+    async fn test_non_canonical_varint_is_payer_side_400_with_reason_display() {
+        let parent = spending(&rootless(&[(1, vec![0x52])]), &[(1000, OP_TRUE.to_vec())]);
+        let subject = spending(&parent, &[(1000, hex::decode(our_script()).unwrap())]);
+        let (mut beef, root) = beef_of(&[&parent, &subject], true);
+        let (ok, _) = verify_with(&beef, Ok(root.clone())).await;
+        assert_eq!(ok.unwrap(), 1000);
+        assert_eq!(beef[4], 1);
+        beef.splice(4..5, [0xfd, 1, 0]);
+        let (err, asked) = verify_with(&beef, Ok(root)).await;
+        let err = err.unwrap_err();
+        let reason = reason_of(&err);
+        assert_eq!(
+            *reason,
+            UnverifiableReason::InvalidBeef {
+                offset: 4,
+                kind: "BadVarint".into(),
+                reason: "invalid BEEF at byte 4: BadVarint".into(),
+            }
+        );
+        assert!(!err.is_server_side());
+        assert_eq!(err.response_class(), (400, "ERR_PAYMENT_INVALID"));
+        assert!(err.to_string().contains(&reason.to_string()));
+        assert!(asked.is_empty());
+    }
+
     /// The scripts run (0.5.0): a payment spending a proven parent locked to
     /// a key, with no signature, is `SpendRefused`; the lookup is not asked.
     /// 0.4.x checked the structure alone and served it.

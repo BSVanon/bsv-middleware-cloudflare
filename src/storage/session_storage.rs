@@ -29,6 +29,9 @@ use async_trait::async_trait;
 /// looking up a session by nonce or by peer identity key, persisting a new
 /// session during the handshake, and updating an existing session after a
 /// verified message.
+// async-trait adds must_use to boxed futures, which are already must_use.
+// Rust 1.99 diagnoses that generated attribute as redundant.
+#[allow(clippy::double_must_use)]
 #[async_trait(?Send)]
 pub trait SessionStorage {
     /// Retrieves a session by its (server) session nonce.
