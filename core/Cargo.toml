@@ -2,7 +2,7 @@
 name = "bsv-middleware-core"
 version = "0.3.2"
 edition = "2021"
-rust-version = "1.87"
+rust-version = "1.88"
 description = "Runtime-free BSV BRC-103/104 authentication and BRC-29 payment verification: the pure rules behind bsv-middleware-cloudflare"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/Calhooon/bsv-middleware-cloudflare"
