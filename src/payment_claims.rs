@@ -14,8 +14,8 @@
 //! | Won | Proceed |
 //! | SameTransaction / Unknown | 409 ERR_PAYMENT_REPLAYED |
 //! | OtherTransaction | 400 ERR_PAYMENT_INVALID, no internalize or refund |
-//! | Fault, Closed | 503 ERR_PAYMENT_LOCK_UNAVAILABLE, retryable, quote kept |
-//! | Fault, Open | Fault detail for the host to log and retain its behavior |
+//! | Fault, Closed | 503 ERR_PAYMENT_UNAVAILABLE, retryable, quote kept, Retry-After: 5 |
+//! | Fault, Open | Deprecated compatibility only; every door must use Closed |
 //! No refusal body includes a txid or internal fault detail.
 
 use bsv_middleware_core::{PaymentPrefixStore, PrefixClaim, StoreError};
@@ -207,10 +207,13 @@ impl PaymentPrefixStore for D1PrefixStore<'_> {
     }
 }
 
-/// The door's chosen behavior when its claim ledger cannot answer.
+/// Use [`FaultPosture::Closed`] when the claim ledger cannot answer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FaultPosture {
-    /// Return the fault to the door, which logs and keeps its existing policy.
+    /// Compatibility for one release only. Every door must use `Closed`.
+    #[deprecated(
+        note = "refused by the owner's ruling of 2026-10-19 (m14 fail closed); every door fails closed"
+    )]
     Open,
     /// Refuse with a retryable 503, retaining the quote.
     Closed,
@@ -225,29 +228,49 @@ pub enum PrefixGate {
     Refuse {
         status: u16,
         body: serde_json::Value,
+        /// Pass these through the signed-response helper.
+        headers: Vec<(String, String)>,
     },
     /// Open posture only: the door must log this detail and apply its policy.
     Fault { detail: String },
 }
 
+#[allow(deprecated)] // Preserve Open compatibility for one release.
 fn prefix_gate_answer(claim: Result<PrefixClaim, String>, posture: FaultPosture) -> PrefixGate {
-    let (status, code, description, retryable) = match claim {
+    let (status, code, description) = match claim {
         Ok(PrefixClaim::Won) => return PrefixGate::Proceed,
-        Ok(PrefixClaim::SameTransaction | PrefixClaim::Unknown) => (409, "ERR_PAYMENT_REPLAYED", "This payment is already being processed or was already used. Retry without payment to get a fresh quote.", false),
-        Ok(PrefixClaim::OtherTransaction) => (400, "ERR_PAYMENT_INVALID", "Payment rejected: this derivation prefix was already used by another transaction (BRC-105: each prefix pays once). Nothing was internalized; get a fresh quote.", false),
+        Ok(PrefixClaim::SameTransaction | PrefixClaim::Unknown) => (409, "ERR_PAYMENT_REPLAYED", "This payment is already being processed or was already used. Retry without payment to get a fresh quote."),
+        Ok(PrefixClaim::OtherTransaction) => (400, "ERR_PAYMENT_INVALID", "Payment rejected: this derivation prefix was already used by another transaction (BRC-105: each prefix pays once). Nothing was internalized; get a fresh quote."),
         Err(detail) if posture == FaultPosture::Open => return PrefixGate::Fault { detail },
-        Err(_) => (503, "ERR_PAYMENT_LOCK_UNAVAILABLE", "The payment claim ledger is unavailable. Nothing was internalized; the quote is still valid. Retry the same payment.", true),
+        Err(_) => {
+            let (status, body, headers) = crate::middleware::payment::payment_unavailable_response();
+            return PrefixGate::Refuse { status, body, headers };
+        }
     };
-    let mut body =
-        serde_json::json!({ "status": "error", "code": code, "description": description });
-    if retryable {
-        body["retryable"] = true.into();
+    let body = serde_json::json!({ "status": "error", "code": code, "description": description });
+    PrefixGate::Refuse {
+        status,
+        body,
+        headers: Vec::new(),
     }
-    PrefixGate::Refuse { status, body }
 }
 
 /// Claim through `CLAIMS` before any storage handshake, internalize or handler.
-/// Invalid txid shapes, missing bindings and D1 faults follow the door's explicit `posture`.
+/// Use `FaultPosture::Closed`: invalid txids, missing bindings and D1 faults
+/// return 503 with `Retry-After: 5`. The quote is kept; no wallet call follows.
+/// Pass the body, status and headers through the signed-response helper:
+///
+/// ```no_run
+/// # use bsv_middleware_cloudflare::payment_claims::{payment_prefix_gate, FaultPosture, PrefixGate};
+/// # use bsv_middleware_cloudflare::middleware::auth::{sign_json_response, AuthSession};
+/// # async fn door(env: &worker::Env, session: &AuthSession) -> bsv_middleware_cloudflare::Result<Option<worker::Response>> {
+/// let gate = payment_prefix_gate(env, "prefix", &"a".repeat(64), "agent", FaultPosture::Closed).await;
+/// if let PrefixGate::Refuse { status, body, headers } = gate {
+///     return Ok(Some(sign_json_response(&body, status, &headers, session)?));
+/// }
+/// # Ok(None)
+/// # }
+/// ```
 pub async fn payment_prefix_gate(
     env: &Env,
     prefix: &str,
@@ -278,6 +301,7 @@ pub async fn release_payment_prefix(env: &Env, prefix: &str, txid: &str) {
 }
 
 #[cfg(test)]
+#[allow(deprecated)] // Exercise the retained Open compatibility.
 mod tests {
     use super::*;
 
@@ -303,13 +327,17 @@ mod tests {
                 payment_prefix_gate(&env, "prefix", &txid, "agent", FaultPosture::Open).await,
                 PrefixGate::Fault { detail }
             );
-            let PrefixGate::Refuse { status, body } =
-                payment_prefix_gate(&env, "prefix", &txid, "agent", FaultPosture::Closed).await
+            let PrefixGate::Refuse {
+                status,
+                body,
+                headers,
+            } = payment_prefix_gate(&env, "prefix", &txid, "agent", FaultPosture::Closed).await
             else {
                 panic!("expected closed-posture refusal");
             };
             assert_eq!(status, 503);
-            assert_eq!(body["code"], "ERR_PAYMENT_LOCK_UNAVAILABLE");
+            assert_eq!(headers, vec![("Retry-After".into(), "5".into())]);
+            assert_eq!(body["code"], "ERR_PAYMENT_UNAVAILABLE");
             assert_eq!(body["retryable"], true);
         }
         assert!(validate_txid(&"0123456789abcdef".repeat(4)).is_ok());
@@ -469,12 +497,13 @@ mod tests {
             (
                 Err("private-txid-and-fault-detail".into()),
                 503,
-                "ERR_PAYMENT_LOCK_UNAVAILABLE",
+                "ERR_PAYMENT_UNAVAILABLE",
             ),
         ] {
             let PrefixGate::Refuse {
                 status: actual,
                 body,
+                headers,
             } = prefix_gate_answer(claim, FaultPosture::Closed)
             else {
                 panic!("expected refusal")
@@ -489,10 +518,11 @@ mod tests {
             }
             if status == 503 {
                 assert_eq!(body["retryable"], true);
+                assert_eq!(headers, vec![("Retry-After".into(), "5".into())]);
                 assert!(body["description"]
                     .as_str()
                     .unwrap()
-                    .contains("quote is still valid"));
+                    .contains("Retry the same payment."));
             }
         }
         assert_eq!(

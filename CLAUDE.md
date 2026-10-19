@@ -7,7 +7,7 @@ adapted for the Workers runtime (KV for state, async everywhere, explicit respon
 **Detailed module-level docs are in `src/CLAUDE.md`.** This file is a quick orientation.
 
 Since 0.4.0 this is a two-crate workspace: `core/` is `bsv-middleware-core` (the runtime-free rules: no worker,
-no fetch, no KV/DO/D1, no clock; 0.4.0), and the root crate is the Workers adapter over it (0.7.0). M14 removes deprecated `process_payment` and requires a `PaymentPrefixStore` for payment entry points; other retained public items keep their paths. `src/api_surface_tests.rs` pins the fleet's call shapes.
+no fetch, no KV/DO/D1, no clock; 0.4.0), and the root crate is the Workers adapter over it (0.7.1). M14 removes deprecated `process_payment` and requires a `PaymentPrefixStore` for payment entry points; other retained public items keep their paths. `src/api_surface_tests.rs` pins the fleet's call shapes.
 Since 0.5.0 the payment is read through bsv-rs 0.4's streaming reader with the scripts run, and nothing is refused
 for its size or its counts (the posture of 2026-10-09, "a BEEF of any size"): no limit, no 413, no `BeefLimits`.
 Since 0.5.1 (core 0.2.1) the floor is bsv-rs 0.4.1: a raw transaction with no input is the reader's invalid bytes
@@ -15,7 +15,7 @@ Since 0.5.1 (core 0.2.1) the floor is bsv-rs 0.4.1: a raw transaction with no in
 bsv-middleware-rs 0.4.1), and the core's own `NoProof` for that shape stays beneath the reader as defense in depth.
 No behavior change for a host: payer-side, 400 either way; the 22 vectors are unchanged.
 
-Current release: adapter 0.7.0 / core 0.4.0, both on `bsv-rs = "0.7.0"` (caret), Rust 1.88.
+Current release: adapter 0.7.1 / core 0.4.0, both on `bsv-rs = "0.7.0"` (caret), Rust 1.88.
 Hashing uses bsv-rs `primitives::hash::{sha256, sha256_hmac, Sha256}`; no direct sha2 or hmac.
 
 ## Build
@@ -153,8 +153,11 @@ src/                     — bsv-middleware-cloudflare (the Workers adapter)
   `KvPrefixStore` retains G3 (same-edge races and about 60 seconds of propagation).
   Run `PAYMENT_CLAIMS_MIGRATION` once before deploying against an existing table.
   Fleet doors use `payment_prefix_gate` with explicit `FaultPosture`; closed faults
-  return 503 `ERR_PAYMENT_LOCK_UNAVAILABLE`, retryable, quote kept. Open returns
-  fault detail for the door to log. No refusal body names a txid.
+  return 503 `ERR_PAYMENT_UNAVAILABLE`, retryable, quote and prefix kept,
+  `Retry-After: 5`. Every host passes `FaultPosture::Closed` and forwards
+  `Refuse` headers through its signed-response helper. `Open` is deprecated
+  and returns `Fault` for one compatibility release only. Stock store faults
+  return the same 503, with no fresh challenge. No refusal body names a txid.
 - **`accepted` gate on internalize** (audit #44). `PaymentResult::Verified` implies the
   wallet affirmatively returned `accepted: true`; anything else 402s with a fresh
   challenge. The TS reference calls `next()` regardless of `accepted`.
@@ -182,6 +185,7 @@ src/                     — bsv-middleware-cloudflare (the Workers adapter)
 | 401 | `UNAUTHORIZED` / `ERR_INVALID_AUTH` / `ERR_SESSION_NOT_FOUND` / `ERR_REPLAYED_REQUEST`¹ | auth (every one an `AuthResult::Response` since 0.4.1, never an `Err`) |
 | 402 | `ERR_PAYMENT_REQUIRED` / `ERR_PAYMENT_FAILED`¹ (wallet rejected, fresh challenge attached) | payment |
 | 500 | `ERR_SERVER_MISCONFIGURED` (no auth first, `NoHeaderService`, a `PaymentFault`: the server's key) / `ERR_PAYMENT_INTERNAL` / `ERR_STORAGE` / `ERR_SDK` / `ERR_TRANSPORT` / `ERR_CONFIG` | payment / infra |
+| 503 | `ERR_PAYMENT_UNAVAILABLE` | Claim-store fault; retryable, `Retry-After: 5`, quote and prefix kept, no fresh challenge |
 | 503 | `ERR_HEADER_SERVICE_UNAVAILABLE`¹ (a server-side `Unverifiable`: the header service could not answer at `fields.height`; quote kept, retry the same payment) | payment (rendered directly, no `AuthCloudflareError` variant) |
 
 ¹ Not in the Express reference — hardening additions (audit #30/#44; the 503 by the fail-closed ruling of 2026-10-08;

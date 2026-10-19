@@ -325,6 +325,8 @@ enum PaymentDecision {
     ReplayedPrefix,
     /// Another transaction already bound this prefix. 400, no fresh challenge.
     PrefixUsedByAnotherTransaction,
+    /// Claim store fault: retryable 503, quote kept, no wallet call.
+    PrefixStoreUnavailable { detail: String },
     /// Wallet did not affirmatively accept (`accepted != true`) → 402
     /// `ERR_PAYMENT_FAILED` with a fresh challenge; the old prefix stays
     /// consumed ([`PaymentResult::Failed`]).
@@ -575,13 +577,17 @@ where
     match prefixes
         .claim_prefix(&payment.derivation_prefix, &txid, ORIGINATOR)
         .await
-        .map_err(|e| AuthCloudflareError::KvError(e.to_string()))?
     {
-        PrefixClaim::Won => {}
-        PrefixClaim::SameTransaction | PrefixClaim::Unknown => {
+        Err(e) => {
+            return Ok(PaymentDecision::PrefixStoreUnavailable {
+                detail: e.to_string(),
+            })
+        }
+        Ok(PrefixClaim::Won) => {}
+        Ok(PrefixClaim::SameTransaction | PrefixClaim::Unknown) => {
             return Ok(PaymentDecision::ReplayedPrefix)
         }
-        PrefixClaim::OtherTransaction => {
+        Ok(PrefixClaim::OtherTransaction) => {
             return Ok(PaymentDecision::PrefixUsedByAnotherTransaction)
         }
     }
@@ -691,6 +697,15 @@ fn decision_into_result(decision: PaymentDecision) -> Result<PaymentResult> {
             "ERR_INVALID_DERIVATION_PREFIX",
             "The derivation prefix was already used by another transaction (BRC-105: each prefix pays once). Nothing was internalized; request a fresh challenge.",
         ),
+        PaymentDecision::PrefixStoreUnavailable { detail } => {
+            warn_log(&format!("payment prefix store unavailable: {detail}"));
+            let (status, body, headers) = payment_unavailable_response();
+            let response = Response::from_json(&body)?.with_status(status);
+            for (name, value) in headers {
+                response.headers().set(&name, &value)?;
+            }
+            Ok(PaymentResult::Failed(add_cors_headers(response)))
+        }
         PaymentDecision::WalletRejected {
             price,
             fresh_prefix,
@@ -792,6 +807,11 @@ fn decision_into_result_signed(
             "ERR_INVALID_DERIVATION_PREFIX",
             "The derivation prefix was already used by another transaction (BRC-105: each prefix pays once). Nothing was internalized; request a fresh challenge.",
         ),
+        PaymentDecision::PrefixStoreUnavailable { detail } => {
+            warn_log(&format!("payment prefix store unavailable: {detail}"));
+            let (status, body, headers) = payment_unavailable_response();
+            Ok(PaymentResult::Failed(sign_json_response(&body, status, &headers, session)?))
+        }
         PaymentDecision::WalletRejected {
             price,
             fresh_prefix,
@@ -836,6 +856,20 @@ fn decision_into_result_signed(
             }))
         }
     }
+}
+
+/// Shared wire response for stock and fleet claim-store failures.
+pub(crate) fn payment_unavailable_response() -> (u16, serde_json::Value, Vec<(String, String)>) {
+    (
+        503,
+        serde_json::json!({
+            "status": "error",
+            "code": "ERR_PAYMENT_UNAVAILABLE",
+            "description": "Payment processing is temporarily unavailable. Retry the same payment.",
+            "retryable": true
+        }),
+        vec![("Retry-After".into(), "5".into())],
+    )
 }
 
 /// The 503 body description for a root the header service could not check:
@@ -2044,25 +2078,58 @@ mod tests {
 
         #[tokio::test]
         async fn store_fault_during_consume_fails_closed() {
-            // A storage fault must surface as Err (→ 500 ERR_STORAGE), never
-            // silently disable replay protection.
             let store = TestPrefixes::default();
             let prefix = issued_prefix().await;
+            let header = header_for(&prefix);
+            let calls = std::cell::Cell::new(0);
             store.fail_consume(true);
-            let err = decide_payment(
+            let decision = decide_payment(
                 &auth(),
                 || PRICE,
-                header_for(&prefix),
+                header.clone(),
                 TEST_KEY_HEX,
                 &store,
-                wallet_unreachable,
+                |_, _, _| {
+                    calls.set(calls.get() + 1);
+                    async { Ok(serde_json::json!({"accepted": true})) }
+                },
             )
             .await
-            .unwrap_err();
-            assert!(
-                matches!(err, AuthCloudflareError::KvError(_)),
-                "expected KvError, got {err:?}"
+            .unwrap();
+            assert!(matches!(
+                decision,
+                PaymentDecision::PrefixStoreUnavailable { .. }
+            ));
+            let (status, body, headers) = payment_unavailable_response();
+            assert_eq!(status, 503);
+            assert_eq!(
+                body,
+                serde_json::json!({
+                    "status": "error", "code": "ERR_PAYMENT_UNAVAILABLE",
+                    "description": "Payment processing is temporarily unavailable. Retry the same payment.",
+                    "retryable": true
+                })
             );
+            assert_eq!(headers, vec![("Retry-After".into(), "5".into())]);
+            assert_eq!(calls.get(), 0);
+            assert!(!store.is_consumed(&prefix));
+            store.fail_consume(false);
+            let retry = decide_payment(
+                &auth(),
+                || PRICE,
+                header,
+                TEST_KEY_HEX,
+                &store,
+                |_, _, _| {
+                    calls.set(calls.get() + 1);
+                    async { Ok(serde_json::json!({"accepted": true})) }
+                },
+            )
+            .await
+            .unwrap();
+            assert!(matches!(retry, PaymentDecision::Verified { .. }));
+            assert_eq!(calls.get(), 1);
+            assert!(store.is_consumed(&prefix));
         }
 
         // ---- P0-3b: the paying output is compared with the price ----

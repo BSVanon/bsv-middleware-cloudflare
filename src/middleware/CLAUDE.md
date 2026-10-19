@@ -157,7 +157,7 @@ let signed = sign_json_response(&data, 200, &extra_headers, &session)?;
 - **When:** After authentication; only for endpoints requiring payment
 - **Input:** `&Request`, `&AuthContext`, `&PaymentMiddlewareOptions<F>`, `&impl PaymentPrefixStore`
 - **Output:** `Result<PaymentResult>` indicating payment status
-- **Errors:** Returns 400/402/500 responses or `AuthCloudflareError` variants
+- **Errors:** Returns 400/402/500/503 responses or `AuthCloudflareError` variants
 
 **Payment Flow:**
 
@@ -185,8 +185,12 @@ let signed = sign_json_response(&data, 200, &extra_headers, &session)?;
 storage is separate. Run `PAYMENT_CLAIMS_MIGRATION` once on existing tables before
 0.7.0; legacy rows remain closed. The stateless `process_payment` was removed.
 Fleet `payment_prefix_gate` takes explicit `FaultPosture`: Closed gives retryable
-503 `ERR_PAYMENT_LOCK_UNAVAILABLE`, quote kept; Open returns fault detail for the
-door to log. Other txid gives 400 `ERR_PAYMENT_INVALID`, same/unknown 409
+503 `ERR_PAYMENT_UNAVAILABLE`, quote and prefix kept, `Retry-After: 5`, no
+fresh challenge. Every host passes `FaultPosture::Closed` and forwards the
+`Refuse` headers through `sign_json_response`. `Open` is deprecated; it returns
+`Fault` for one compatibility release only. The stock path maps a store fault
+to `PrefixStoreUnavailable { detail }` and renders the same signed or unsigned
+503; detail is logged only. Other txid gives 400 `ERR_PAYMENT_INVALID`, same/unknown 409
 `ERR_PAYMENT_REPLAYED`. The host signs responses; bodies never include a txid.
 
 **Configuration (`PaymentMiddlewareOptions<F>`):**
@@ -365,6 +369,7 @@ All error responses are JSON with this structure:
 | `ERR_PAYMENT_REQUIRED` | 402 | payment | Payment needed for this resource |
 | `ERR_MALFORMED_PAYMENT` | 400 | payment | Cannot parse payment JSON |
 | `ERR_INVALID_DERIVATION_PREFIX` | 400 | payment | HMAC nonce verification failed |
+| `ERR_PAYMENT_UNAVAILABLE` | 503 | payment | Claim-store fault; retryable, `Retry-After: 5`, quote and prefix kept, no fresh challenge |
 | `ERR_PAYMENT_FAILED` | 400 | payment | Transaction internalization failed |
 
 Since 0.4.1 no authentication refusal is raised as an `Err`: `process_auth*` renders each as the 401 above (`AuthRefusal` → `refusal_response`, the one place; `settle` catches the 401-class errors raised below the door, the transport's and the handshake path's). An `Err` from `process_auth*` is a fault the host renders 500.

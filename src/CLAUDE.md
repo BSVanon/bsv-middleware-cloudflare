@@ -357,8 +357,10 @@ exact. A DO auth backend does not change the payment backend. Run both
 claims table; legacy NULL-txid rows remain closed. Never expire prefix rows.
 Fleet doors use `payment_prefix_gate`: other txid 400 `ERR_PAYMENT_INVALID`,
 same/unknown 409 `ERR_PAYMENT_REPLAYED`, closed faults 503
-`ERR_PAYMENT_LOCK_UNAVAILABLE` with `retryable: true` and the quote kept. Open
-faults return detail for the door to log. Bodies never name either txid.
+`ERR_PAYMENT_UNAVAILABLE` with `retryable: true`, `Retry-After: 5`, quote and
+prefix kept, and no fresh challenge. Every host must pass `FaultPosture::Closed`
+and forward `Refuse` headers through its signed-response helper. `Open` is
+deprecated and returns `Fault` for one compatibility release only. Bodies never name either txid.
 
 ### Nonce Handling (TS SDK Compatibility)
 
@@ -409,7 +411,11 @@ Error variants and their codes (matching Express middleware):
 
 Since 0.4.1 the three Auth variants never escape `process_auth*`: an authentication refusal is rendered by the middleware itself as a 401 `AuthResult::Response` (CORS, unsigned) carrying the variant's code (`UNAUTHORIZED` with the reference's `message` field; `ERR_INVALID_AUTH` for an identity that is not the session's, a missing or wrong signature, a session that never completed its handshake, a missing per-request nonce, headers that do not form a message, a refused handshake message; `ERR_SESSION_NOT_FOUND`; `ERR_REPLAYED_REQUEST`). An `Err` from `process_auth*` is a fault (the Infra and Config rows), the host's 500.
 
-Two payment-path answers are rendered directly by `middleware/payment.rs` without an `AuthCloudflareError` variant: `500 ERR_SERVER_MISCONFIGURED` for the core's `NoHeaderService` or a `PaymentFault` (the `ServerFault` decision) and `503 ERR_HEADER_SERVICE_UNAVAILABLE` for a server-side `Unverifiable` (the `HeaderServiceUnavailable` decision: fail-closed, the quote kept, retry the same payment). A payer-side `Unverifiable` is the `InvalidPayment` decision's `400 ERR_INVALID_PAYMENT`, the quote kept.
+| Status | Code | Condition |
+|---|---|---|
+| 503 | `ERR_PAYMENT_UNAVAILABLE` | Claim-store fault; retryable, `Retry-After: 5`, quote and prefix kept, no fresh challenge |
+
+Three payment-path answers are rendered directly by `middleware/payment.rs` without an `AuthCloudflareError` variant: `500 ERR_SERVER_MISCONFIGURED` for the core's `NoHeaderService` or a `PaymentFault` (the `ServerFault` decision) and `503 ERR_HEADER_SERVICE_UNAVAILABLE` for a server-side `Unverifiable` (the `HeaderServiceUnavailable` decision: fail-closed, the quote kept, retry the same payment). A `PaymentPrefixStore` fault is `PrefixStoreUnavailable { detail }`, rendered as 503 `ERR_PAYMENT_UNAVAILABLE` with `retryable: true` and `Retry-After: 5`, quote and prefix kept, no fresh challenge. Both signed and unsigned paths use the same wire body; detail is logged only. A payer-side `Unverifiable` is the `InvalidPayment` decision's `400 ERR_INVALID_PAYMENT`, the quote kept.
 
 Automatic `From` conversions: `bsv_sdk::Error` -> `SdkError`, `worker::Error` -> `KvError`, `serde_json::Error` -> `SerializationError`, `bsv_middleware_core::AuthError` -> the same-named variant, message intact (`InvalidAuthentication`, `Config` -> `ConfigError`, `Sdk` -> `SdkError`, `Serialization` -> `SerializationError`).
 

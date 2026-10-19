@@ -3,6 +3,20 @@
 All notable changes to `bsv-middleware-cloudflare`. Versions below 1.0 may change public API between minor versions;
 patch versions are additive unless a line below says otherwise.
 
+## Adapter 0.7.1 - 2026-10-19
+
+> m14 fail closed: every door, 503 retryable, quote and prefix kept, a Retry-After; the reference's own shape (ts-stack fb1b2da, payment middleware: 503 ERR_PAYMENT_UNAVAILABLE when the replay store throws).
+
+- Follow the owner's ruling above: the fleet helper's store faults, missing `CLAIMS` binding and txid shape guard return the response below with `FaultPosture::Closed`. The stock `PaymentPrefixStore` fault becomes `PaymentDecision::PrefixStoreUnavailable { detail }`, with the same response in signed and unsigned paths. No wallet call, prefix consumption or fresh challenge; retry the same payment. Internal detail is never in the body. Core remains 0.4.0.
+- `FaultPosture::Open` is deprecated with the owner's 2026-10-19 ruling; it remains compiled and returns `Fault` for one compatibility release only. `Closed` is the required host behavior.
+- `PrefixGate::Refuse` adds `headers: Vec<(String, String)>`, directly accepted by the signed-response helper; the fleet helper doctest shows forwarding body, status and headers.
+
+| Status | Code | Body / header |
+|---|---|---|
+| 503 | `ERR_PAYMENT_UNAVAILABLE` | `{"status":"error","code":"ERR_PAYMENT_UNAVAILABLE","description":"Payment processing is temporarily unavailable. Retry the same payment.","retryable":true}`; `Retry-After: 5` |
+
+Migration for every host: re-pin adapter 0.7.1 (core stays 0.4.0), pass `FaultPosture::Closed`, and pass the returned headers through the signed-response helper. This applies to the agents' 14 doors across 13 Workers, LOW's tower, the relay, Zanaadu, wallet-infra, both message-box copies, and the template. Retain the one-time M14 table migration and txid-bound release rules from 0.7.0.
+
 ## Adapter 0.7.0 and core 0.4.0 - 2026-10-19
 
 - Move both SDK floors to `bsv-rs = "0.7.0"` (caret, a new compatibility line), preserving feature lists and Rust 1.88. The SDK corrects non-FORKID and Chronicle signing digests and adds `SigningContext::script_code`; this repository has no such struct literals. Default FORKID template digests are byte-identical, so the payment door is unaffected.
@@ -10,7 +24,7 @@ patch versions are additive unless a line below says otherwise.
 - Add deny rows for sha2, ripemd, secp256k1, k256, bs58, hmac and p256, allowing only bsv-rs and the immediate parents verified in this workspace.
 - **M14 (BRC-105): a derivation prefix binds its first subject txid permanently, before any wallet call.** A different txid gets 400 `ERR_INVALID_DERIVATION_PREFIX`, no fresh challenge, no internalize and no refund. A held or served prefix refuses its own txid too. An internalize error releases only that txid's attempt; its identical retry can re-take the record once. Wallet rejection keeps it held. This closes G1 (release previously deleted the binding) and G2 (the stateless path). G3 remains documented on KV: concurrent requests or propagation across edges can race its read/write; D1 is exact.
 - Remove deprecated `process_payment`. `process_payment_with_storage` and `process_payment_with_storage_signed` now require a `PaymentPrefixStore` instead of `SessionStorage`. Add core `PaymentPrefixStore`, `PrefixClaim`, its `MemoryStore` implementation, and `payment_subject_txid`; deprecate `PAYMENT_NONCE_SCOPE` (retained as the legacy KV namespace). `PaymentNonceStore` is for BRC-104 only; `ClaimStore` and `claim_payment_nonce` / `release_payment_nonce` are for idempotency keys only.
-- Add `D1PrefixStore`, `KvPrefixStore`, `claim_payment_prefix`, `payment_prefix_gate`, `release_payment_prefix`, `PrefixGate`, `FaultPosture`, and `PAYMENT_CLAIMS_MIGRATION`. The DO session backend no longer routes payment scope to KV. Fleet helper faults take explicit `FaultPosture::Open` (return detail for the door to log) or `Closed` (503 `ERR_PAYMENT_LOCK_UNAVAILABLE`, `retryable: true`, quote kept); the stock middleware propagates store faults and fails closed.
+- Add `D1PrefixStore`, `KvPrefixStore`, `claim_payment_prefix`, `payment_prefix_gate`, `release_payment_prefix`, `PrefixGate`, `FaultPosture`, and `PAYMENT_CLAIMS_MIGRATION`. The DO session backend no longer routes payment scope to KV. Fleet helper faults take explicit `FaultPosture::Open` (return detail for the door to log) or `Closed` (503 with the legacy claim-lock-unavailable code, `retryable: true`, quote kept); the stock middleware propagates store faults and fails closed.
 - **Every host with an existing claims table runs this migration ONCE before deploying 0.7.0.** Existing rows become `txid NULL, released 0` and refuse reuse as `Unknown`. Bound rows are never deleted, including by the legacy key-release helper. Do not TTL-sweep prefix rows.
 
   ```sql

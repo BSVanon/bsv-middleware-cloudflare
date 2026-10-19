@@ -46,7 +46,7 @@ Error codes, HTTP statuses, and all `x-bsv-auth-*` / `x-bsv-payment-*` header na
 ## Install
 
 ```toml
-bsv-middleware-cloudflare = "0.7.0"
+bsv-middleware-cloudflare = "0.7.1"
 # Runtime-free hosts:
 bsv-middleware-core = "0.4.0"
 ```
@@ -182,7 +182,7 @@ All error codes, HTTP statuses, and header names match the Express versions:
 | Auth error codes | `UNAUTHORIZED`, `ERR_INVALID_AUTH`, `ERR_SESSION_NOT_FOUND` | identical |
 | Payment error codes | `ERR_PAYMENT_REQUIRED`, `ERR_MALFORMED_PAYMENT`, `ERR_INVALID_DERIVATION_PREFIX`, `ERR_PAYMENT_FAILED` | identical |
 | Headers | `x-bsv-auth-*`, `x-bsv-payment-*` | identical |
-| HTTP statuses | 400 / 401 / 402 / 500 | identical, plus 503 `ERR_HEADER_SERVICE_UNAVAILABLE` when the header service cannot answer (the quote kept); a payment that cannot be verified for the payer's reason (invalid BEEF, a refused spend, no proof) is 400 `ERR_INVALID_PAYMENT` with the quote kept (0.5.0); every authentication refusal is a 401 `AuthResult::Response` (0.4.1), never an `Err` |
+| HTTP statuses | 400 / 401 / 402 / 500 | claim-store faults: 503 `ERR_PAYMENT_UNAVAILABLE`, `retryable: true`, `Retry-After: 5`, quote and prefix kept; plus 503 `ERR_HEADER_SERVICE_UNAVAILABLE` when the header service cannot answer (the quote kept); a payment that cannot be verified for the payer's reason (invalid BEEF, a refused spend, no proof) is 400 `ERR_INVALID_PAYMENT` with the quote kept (0.5.0); every authentication refusal is a 401 `AuthResult::Response` (0.4.1), never an `Err` |
 
 Known divergences (architectural, not bugs):
 - **Response signing is explicit.** Callers invoke `sign_json_response` rather than relying on `res.json` interception.
@@ -318,8 +318,17 @@ call `payment_prefix_gate(env, prefix, txid, agent, FaultPosture::Closed)` after
 verification and before the wallet, then sign any `PrefixGate::Refuse` body.
 `SameTransaction` / legacy `Unknown` return 409 `ERR_PAYMENT_REPLAYED`;
 `OtherTransaction` returns 400 `ERR_PAYMENT_INVALID`. A closed fault returns 503
-`ERR_PAYMENT_LOCK_UNAVAILABLE`, `retryable: true`, with the quote kept. Open posture
-returns `PrefixGate::Fault { detail }` for the door to log and apply its policy.
+`ERR_PAYMENT_UNAVAILABLE`, `retryable: true`, with the quote and prefix kept,
+no fresh challenge, and `Retry-After: 5`. Pass `FaultPosture::Closed` at every
+host and pass `Refuse { status, body, headers }` through `sign_json_response`.
+`FaultPosture::Open` is deprecated by the owner's ruling of 2026-10-19;
+it returns `Fault` for one compatibility release only. The stock payment path
+returns the same 503 on a `PaymentPrefixStore` fault.
+
+| Claim-store failure | Status | Code | Retry |
+|---|---|---|---|
+| Store fault, missing `CLAIMS`, or invalid txid shape (fleet `Closed`); stock store fault | 503 | `ERR_PAYMENT_UNAVAILABLE` | `retryable: true`, `Retry-After: 5`; same payment, quote and prefix kept |
+
 No refusal body includes either transaction's txid. `release_payment_prefix`
 retains the binding. `claim_payment_nonce` / `release_payment_nonce` and
 `D1ClaimStore` are only for idempotency keys, such as refund-once keys.
@@ -338,7 +347,7 @@ across edges (about 60 seconds) can admit competing transactions. A DO auth
 backend does not make this KV payment backend exact; select D1 separately.
 
 ```toml
-bsv-middleware-cloudflare = { version = "0.7.0", features = ["d1-claims"] }
+bsv-middleware-cloudflare = { version = "0.7.1", features = ["d1-claims"] }
 ```
 
 ## Session storage backends
