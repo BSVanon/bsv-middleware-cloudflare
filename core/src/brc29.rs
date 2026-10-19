@@ -178,6 +178,15 @@ pub(crate) fn judge_output(
     Ok(paid)
 }
 
+/// Read the subject txid using the same selection as [`verify_payment_output`]:
+/// the Atomic BEEF's named transaction, otherwise the last transaction.
+/// This reads the transaction only; it does not verify scripts or proofs.
+pub fn payment_subject_txid(tx_bytes: &[u8]) -> Result<String, UnverifiableReason> {
+    let tx = Transaction::from_beef(tx_bytes, None)
+        .map_err(|e| UnverifiableReason::MalformedTransaction(e.to_string()))?;
+    Ok(tx.id())
+}
+
 /// Does output `output_index` of the BEEF-encoded payment transaction pay the
 /// server's BRC-29 derived key at least `required_satoshis`?
 ///
@@ -648,6 +657,21 @@ mod tests {
             .unwrap();
             assert_eq!(verdict, PaymentVerdict::Verified { satoshis: 1000 });
         }
+    }
+
+    #[test]
+    fn payment_subject_txid_selects_the_atomic_name_or_last_plain_transaction() {
+        let first = spending(&rootless(&[(1, vec![0x52])]), &[(1000, OP_TRUE.to_vec())]);
+        let last = spending(&first, &[(999, OP_TRUE.to_vec())]);
+        let (plain, _) = beef_of(&[&first, &last], true);
+        assert_eq!(payment_subject_txid(&plain).unwrap(), last.id());
+        let mut beef = bsv_sdk::transaction::Beef::from_binary(&plain).unwrap();
+        let atomic = beef.to_binary_atomic(&first.id()).unwrap();
+        assert_eq!(payment_subject_txid(&atomic).unwrap(), first.id());
+        assert!(matches!(
+            payment_subject_txid(&[]),
+            Err(UnverifiableReason::MalformedTransaction(_))
+        ));
     }
 
     #[tokio::test]

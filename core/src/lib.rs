@@ -79,13 +79,19 @@ pub mod verdict;
 
 pub use auth::{AuthError, SessionBinding};
 pub use brc104::{auth_headers, HttpRequestData, HttpResponseData};
-pub use brc29::{expected_locking_script, verify_payment_output, BRC29_PROTOCOL_ID};
+pub use brc29::{
+    expected_locking_script, payment_subject_txid, verify_payment_output, BRC29_PROTOCOL_ID,
+};
 pub use header_service::{ChainTip, HeaderService, LookupFn, MerkleRoot, NoService, ServiceError};
 pub use payment_verify::{
     verify_brc29_payment, verify_brc29_payment_stream, verify_brc29_payment_structural_only,
     verify_brc29_payment_verified, AsyncByteSource, SliceSource,
 };
 pub use spv::{check_roots, decide_root, RootDecision, RootsOutcome};
-pub use store::{ClaimStore, MemoryStore, PaymentNonceStore, StoreError, PAYMENT_NONCE_SCOPE};
+#[allow(deprecated)]
+pub use store::{
+    ClaimStore, MemoryStore, PaymentNonceStore, PaymentPrefixStore, PrefixClaim, StoreError,
+    PAYMENT_NONCE_SCOPE,
+};
 pub use types::{AuthContext, BsvPayment, PaymentContext};
 pub use verdict::{PaymentFault, PaymentVerdict, UnverifiableReason, VerifiedPayment};

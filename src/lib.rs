@@ -22,7 +22,7 @@
 //! - **BRC-103/104 Mutual Authentication**: Cryptographic authentication using BSV keys
 //! - **BRC-29 Payment Verification**: Accept BSV payments for API access
 //! - **Replay Protection**: per-request auth nonces and payment derivation
-//!   prefixes are single-use via the pluggable [`SessionStorage`] nonce store
+//!   prefixes bind their first txid through [`PaymentPrefixStore`]
 //!   (a hardening divergence from the TS reference middleware — see
 //!   [`middleware::auth`] for the precise residual window under Cloudflare KV)
 //! - **Payment verification before internalize**: [`verify_brc29_payment`]
@@ -42,7 +42,7 @@
 //! ```rust,ignore
 //! use bsv_middleware_cloudflare::{
 //!     middleware::{AuthMiddlewareOptions, PaymentMiddlewareOptions, process_auth, process_payment_with_storage, AuthResult, PaymentResult},
-//!     KvSessionStorage,
+//!     KvPrefixStore, KvSessionStorage,
 //!     utils::handle_cors_preflight,
 //! };
 //! use worker::*;
@@ -72,16 +72,14 @@
 //!         AuthResult::Response(response) => return Ok(response),
 //!     };
 //!
-//!     // Process payment (if needed). The session storage doubles as the
-//!     // single-use nonce store that makes payment derivation prefixes
-//!     // one-shot (replay protection).
+//!     // Process payment (if needed) with an explicit prefix store. KV retains a consistency window; D1PrefixStore is exact.
 //!     let payment_options = PaymentMiddlewareOptions::new(
 //!         server_key,
 //!         |_req| 100, // 100 satoshis per request
 //!     );
 //!     let session_storage = KvSessionStorage::new(env.kv("AUTH_SESSIONS")?, "auth", 3600);
 //!
-//!     let payment_result = process_payment_with_storage(&req, &auth_context, &payment_options, &session_storage).await
+//!     let payment_result = process_payment_with_storage(&req, &auth_context, &payment_options, &KvPrefixStore(&session_storage)).await
 //!         .map_err(|e| Error::from(e.to_string()))?;
 //!
 //!     match payment_result {
@@ -155,7 +153,8 @@ mod api_surface_tests;
 /// dependency line (`bsv_middleware_cloudflare::core::PaymentVerdict`).
 pub use bsv_middleware_core as core;
 pub use bsv_middleware_core::{
-    HeaderService, PaymentFault, PaymentVerdict, UnverifiableReason, VerifiedPayment,
+    payment_subject_txid, HeaderService, PaymentFault, PaymentPrefixStore, PaymentVerdict,
+    PrefixClaim, UnverifiableReason, VerifiedPayment,
 };
 pub use client::{ClientSessionSnapshot, WorkerStorageClient};
 pub use env::payment_work_limit;
@@ -171,8 +170,7 @@ pub use middleware::auth::{
 pub use middleware::multipart::{
     prepare_multipart_payment, split_multipart_payment, MultipartPayment, PaymentPart,
 };
-#[allow(deprecated)] // re-exported for backward compatibility
-pub use middleware::payment::process_payment;
+#[allow(deprecated)]
 pub use middleware::payment::{
     add_payment_headers, payment_headers, process_payment_with_storage,
     process_payment_with_storage_signed, PaymentMiddlewareOptions, PaymentResult,
@@ -180,7 +178,11 @@ pub use middleware::payment::{
 };
 pub use middleware::session_lane;
 #[cfg(feature = "d1-claims")]
-pub use payment_claims::{claim_payment_nonce, release_payment_nonce, PAYMENT_CLAIMS_SCHEMA};
+pub use payment_claims::{
+    claim_payment_nonce, claim_payment_prefix, payment_prefix_gate, release_payment_nonce,
+    release_payment_prefix, D1PrefixStore, FaultPosture, PrefixGate, PAYMENT_CLAIMS_MIGRATION,
+    PAYMENT_CLAIMS_SCHEMA,
+};
 pub use payment_verify::{
     accept_verdict, expected_brc29_locking_script, verify_brc29_payment,
     verify_brc29_payment_budgeted, verify_brc29_payment_output, verify_brc29_payment_source,
@@ -190,8 +192,8 @@ pub use payment_verify::{
 };
 pub use storage::do_session::{AuthSessionStore, DoSessionStorage};
 pub use storage::{
-    KvPaymentStorage, KvSessionStorage, LaneVerdict, LaneVerifyAsk, SessionNonceStore,
-    SessionStorage,
+    KvPaymentStorage, KvPrefixStore, KvSessionStorage, LaneVerdict, LaneVerifyAsk,
+    SessionNonceStore, SessionStorage,
 };
 pub use transport::{auth_headers, CloudflareTransport, HttpRequestData, HttpResponseData};
 pub use types::{AuthContext, BsvPayment, PaymentContext};

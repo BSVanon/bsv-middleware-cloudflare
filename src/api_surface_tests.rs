@@ -171,6 +171,7 @@ fn the_auth_and_payment_types_keep_their_paths_and_fields() {
 
 /// The transport and lane re-exports are the core's items at the 0.3 paths.
 #[test]
+#[allow(deprecated)]
 fn the_transport_and_lane_re_exports_are_the_cores() {
     use crate::transport::{auth_headers, CloudflareTransport, HttpResponseData};
     use bsv_sdk::auth::types::{AuthMessage, MessageType};

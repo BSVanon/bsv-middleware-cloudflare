@@ -7,12 +7,12 @@ Port of [`auth-express-middleware`](https://github.com/bitcoin-sv/auth-express-m
 ## What it provides
 
 - **`process_auth`** / **`process_auth_with_storage`** - BRC-103/104 mutual identity handshake, session verification, certificate exchange, and per-request replay protection (each `x-bsv-auth-nonce` is single-use per session). Returns the authenticated identity key, a reusable session handle, and the raw request body. Every authentication refusal is a 401 response from the middleware itself (0.4.1), with CORS, unsigned; an `Err` is a fault (storage, the server's key, the transport).
-- **`process_payment_with_storage`** - BRC-29 payment verification. Emits `402 Payment Required` with derivation prefix, accepts `x-bsv-payment` header, reads output 0 of the payment and refuses it (`400 ERR_INVALID_PAYMENT`, the quote kept) unless it pays this server's BRC-29 derived key at least the price (0.3.8; 400 since 0.4.0), internalizes via a remote wallet storage endpoint, gates on the wallet's `accepted` flag, and enforces single-use derivation prefixes. `satoshis_paid` is the amount read from the output. (`process_payment` remains as a deprecated stateless variant.)
+- **`process_payment_with_storage`** - BRC-29 payment verification. Emits `402 Payment Required` with derivation prefix, accepts `x-bsv-payment` header, reads output 0 of the payment and refuses it (`400 ERR_INVALID_PAYMENT`, the quote kept) unless it pays this server's BRC-29 derived key at least the price (0.3.8; 400 since 0.4.0), internalizes via a remote wallet storage endpoint, gates on the wallet's `accepted` flag, and enforces single-use derivation prefixes. `satoshis_paid` is the amount read from the output. The prefix binds its first txid permanently (M14).
 - **`sign_json_response`** - signs outbound JSON responses so BRC-103/104 clients (e.g. `AuthFetch`) can verify server identity and message integrity. Equivalent to Express's `res.json` hijacking, but explicit.
-- **`WorkerStorageClient`** - WASM-compatible RPC client for a wallet storage server (e.g. `storage.babbage.systems`), used by `process_payment` and optional refund flows.
+- **`WorkerStorageClient`** - WASM-compatible RPC client for a wallet storage server (e.g. `storage.babbage.systems`), used by the payment middleware and optional refund flows.
 - **Optional `refund` feature** - BRC-41 refund transaction builder for partial-refund scenarios (e.g. AI agents that pre-charge and refund on failure). Not present in the Express reference.
 - **`verify_brc29_payment`** / **`verify_brc29_payment_output`** (0.3.6) - checks, before anything is internalized, that a BRC-29 payment output pays *this* server's derived key at least the quoted amount inside a structurally complete BEEF, with merkle roots checked against a header service you run (required: no service, no verdict; `verify_brc29_payment_structural_only` is the named opt-out without SPV). For callers with their own payment flow; the stock middleware runs `verify_brc29_payment_output` itself (0.3.8).
-- **Optional `d1-claims` feature** (0.3.6) - `claim_payment_nonce` / `release_payment_nonce`: an atomic, globally consistent single-use claim on a payment nonce in a D1 table, for callers outside the stock middleware or on the eventually-consistent KV backend.
+- **Optional `d1-claims` feature** - `D1PrefixStore` is the exact payment prefix backend. `payment_prefix_gate` / `release_payment_prefix` support custom doors; the separate nonce-named helpers are for idempotency keys only.
 
 ## Shape (0.4.0): the core and the adapter
 
@@ -171,7 +171,7 @@ Secret: `wrangler secret put SERVER_PRIVATE_KEY` (64-char hex secp256k1 private 
 | Feature | Default | Pulls in |
 |---|---|---|
 | `refund` | off | `bsv-middleware-core/refund` (`ripemd`) - enables `refund::issue_refund` for BRC-41 partial refunds |
-| `d1-claims` | off | `worker/d1` - enables `payment_claims::{claim_payment_nonce, release_payment_nonce}` (atomic single-use payment-nonce claims on a D1 table) |
+| `d1-claims` | off | `worker/d1` - enables exact payment-prefix bindings and idempotency claims on D1 |
 
 ## Parity with Express middleware
 
@@ -186,7 +186,7 @@ All error codes, HTTP statuses, and header names match the Express versions:
 
 Known divergences (architectural, not bugs):
 - **Response signing is explicit.** Callers invoke `sign_json_response` rather than relying on `res.json` interception.
-- **Pluggable storage via `SessionStorage`.** Express lets you swap `SessionManager`; here the equivalent seam is the `SessionStorage` trait (`process_auth_with_storage` / `process_payment_with_storage`), with `KvSessionStorage` as the default backend.
+- **Pluggable storage via `SessionStorage`.** Express lets you swap `SessionManager`; here the equivalent seam is `SessionStorage` for auth and `PaymentPrefixStore` for payments. Use `D1PrefixStore` for exact payment enforcement; `KvPrefixStore` has the G3 consistency window.
 - **No injectable logger.** Use `console_log!` / `console_error!` from the `worker` crate at call sites if needed.
 - **Payment internalizes via HTTP to a wallet storage server**, not a local `WalletInterface`. Required for Workers (no local wallet possible).
 - **No SPV on the middleware's own path.** `process_payment_with_storage` checks output 0's script and amount and nothing else about the transaction: no merkle proof is checked against a block header there. Whether the payment is real and confirmable is left to the wallet storage server's `internalizeAction`, which this crate does not verify. Run `verify_brc29_payment` (through a header service) before it when a proof must be checked.
@@ -196,7 +196,7 @@ Deliberate hardening divergences (the reference is weaker here; security audit f
 - **Every authentication refusal is a 401 answer (0.4.1).** The reference answers `401 UNAUTHORIZED` only when no auth headers are present; a general message its SDK refuses (another identity's key over the session, a bad signature, a session that never completed its handshake) is swallowed by the `Peer` and never answered. Here each of those is `401 ERR_INVALID_AUTH` (`ERR_SESSION_NOT_FOUND` for an unknown session), from `process_auth*` as an `AuthResult::Response` with CORS, so `AuthFetch`-class clients re-handshake; an `Err` from `process_auth*` is a fault (storage, the server's key, the transport), the host's 500.
 - **`accepted` gate.** `payment-express-middleware` calls `next()` even when `wallet.internalizeAction` returns `accepted: false`. Here a rejected payment returns `402` with a fresh challenge and never reaches the handler.
 - **The paying output's script.** `payment-express-middleware` 2.1.9 reads output 0's satoshis and refuses below the price with `400 ERR_INVALID_PAYMENT`, and leaves the script to its wallet's signer. Here the storage server is not a signer, so output 0 must also pay this server's BRC-29 derived key; a short or misdirected payment gets the reference's `400 ERR_INVALID_PAYMENT` with the quote kept (no fresh challenge, the prefix not consumed), before the storage is called (0.3.8 answered 402 with a fresh challenge; 400 since 0.4.0).
-- **Single-use payment derivation prefixes.** The reference's `verifyNonce` is a stateless HMAC; here each verified prefix is consumed (no expiry) via the `SessionStorage` nonce store, so a captured `X-BSV-Payment` header cannot be internalized twice.
+- **M14 payment derivation prefixes.** Each prefix binds its first subject txid forever before any wallet call. Another txid is refused with 400 `ERR_INVALID_DERIVATION_PREFIX`, no fresh challenge, no internalize or refund. The same txid is refused while held or served; an internalize error releases only its own attempt for an identical retry. Wallet rejection keeps the binding held. `process_payment` was removed in 0.7.0.
 
 ## Consumers
 
@@ -312,12 +312,30 @@ visible match from them to the table above (`Verified` is the only `Ok(satoshis)
 be served on. The named opt-out `verify_brc29_payment_structural_only` is the one function that answers `Ok` with
 roots unchecked, because its caller asked for exactly that by name.
 
-With the `d1-claims` feature, `claim_payment_nonce(&db, nonce, agent)` is an atomic `INSERT OR IGNORE` on a D1
-`payment_claims` table (schema in `PAYMENT_CLAIMS_SCHEMA`): `Ok(true)` won, `Ok(false)` already used, `Err` storage
-fault. It is the single-use guard for callers that run their own payment flow and never reach the middleware's
-`try_consume_nonce`, and a second, globally consistent guard for the stock middleware on KV. Using both is safe. Claim
-after `verify_brc29_payment` succeeds and before internalizing; `release_payment_nonce` frees a claim after a
-pre-internalize failure.
+With `d1-claims`, pass `&D1PrefixStore(&db)` to
+`process_payment_with_storage{,_signed}` in place of session storage. Custom doors
+call `payment_prefix_gate(env, prefix, txid, agent, FaultPosture::Closed)` after
+verification and before the wallet, then sign any `PrefixGate::Refuse` body.
+`SameTransaction` / legacy `Unknown` return 409 `ERR_PAYMENT_REPLAYED`;
+`OtherTransaction` returns 400 `ERR_PAYMENT_INVALID`. A closed fault returns 503
+`ERR_PAYMENT_LOCK_UNAVAILABLE`, `retryable: true`, with the quote kept. Open posture
+returns `PrefixGate::Fault { detail }` for the door to log and apply its policy.
+No refusal body includes either transaction's txid. `release_payment_prefix`
+retains the binding. `claim_payment_nonce` / `release_payment_nonce` and
+`D1ClaimStore` are only for idempotency keys, such as refund-once keys.
+
+For existing tables, run `PAYMENT_CLAIMS_MIGRATION` ONCE before deploying 0.7.0:
+
+```sql
+ALTER TABLE payment_claims ADD COLUMN txid TEXT;
+ALTER TABLE payment_claims ADD COLUMN released INTEGER NOT NULL DEFAULT 0;
+```
+
+New tables use `PAYMENT_CLAIMS_SCHEMA`. Never expire payment-prefix rows.
+`KvPrefixStore(&session_storage)` keeps the legacy key namespace and legacy `1`
+records closed, but G3 remains: read/write races at one edge and propagation
+across edges (about 60 seconds) can admit competing transactions. A DO auth
+backend does not make this KV payment backend exact; select D1 separately.
 
 ```toml
 bsv-middleware-cloudflare = { version = "0.7.0", features = ["d1-claims"] }

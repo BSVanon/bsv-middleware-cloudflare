@@ -8,17 +8,25 @@ patch versions are additive unless a line below says otherwise.
 - Move both SDK floors to `bsv-rs = "0.7.0"` (caret, a new compatibility line), preserving feature lists and Rust 1.88. The SDK corrects non-FORKID and Chronicle signing digests and adds `SigningContext::script_code`; this repository has no such struct literals. Default FORKID template digests are byte-identical, so the payment door is unaffected.
 - Route session-lane MACs through `primitives::hash::sha256_hmac`, session/body and authentication digests and conformance tests through `sha256`, and incremental BRC-104 framing through `Sha256`. Remove direct sha2 and hmac dependencies from both crates. The BRC-29 vectors, pinned session-lane vectors, bodySha256 values and byte goldens are unchanged.
 - Add deny rows for sha2, ripemd, secp256k1, k256, bs58, hmac and p256, allowing only bsv-rs and the immediate parents verified in this workspace.
-- (M14: added by the next lane)
+- **M14 (BRC-105): a derivation prefix binds its first subject txid permanently, before any wallet call.** A different txid gets 400 `ERR_INVALID_DERIVATION_PREFIX`, no fresh challenge, no internalize and no refund. A held or served prefix refuses its own txid too. An internalize error releases only that txid's attempt; its identical retry can re-take the record once. Wallet rejection keeps it held. This closes G1 (release previously deleted the binding) and G2 (the stateless path). G3 remains documented on KV: concurrent requests or propagation across edges can race its read/write; D1 is exact.
+- Remove deprecated `process_payment`. `process_payment_with_storage` and `process_payment_with_storage_signed` now require a `PaymentPrefixStore` instead of `SessionStorage`. Add core `PaymentPrefixStore`, `PrefixClaim`, its `MemoryStore` implementation, and `payment_subject_txid`; deprecate `PAYMENT_NONCE_SCOPE` (retained as the legacy KV namespace). `PaymentNonceStore` is for BRC-104 only; `ClaimStore` and `claim_payment_nonce` / `release_payment_nonce` are for idempotency keys only.
+- Add `D1PrefixStore`, `KvPrefixStore`, `claim_payment_prefix`, `payment_prefix_gate`, `release_payment_prefix`, `PrefixGate`, `FaultPosture`, and `PAYMENT_CLAIMS_MIGRATION`. The DO session backend no longer routes payment scope to KV. Fleet helper faults take explicit `FaultPosture::Open` (return detail for the door to log) or `Closed` (503 `ERR_PAYMENT_LOCK_UNAVAILABLE`, `retryable: true`, quote kept); the stock middleware propagates store faults and fails closed.
+- **Every host with an existing claims table runs this migration ONCE before deploying 0.7.0.** Existing rows become `txid NULL, released 0` and refuse reuse as `Unknown`. Bound rows are never deleted, including by the legacy key-release helper. Do not TTL-sweep prefix rows.
+
+  ```sql
+  ALTER TABLE payment_claims ADD COLUMN txid TEXT;
+  ALTER TABLE payment_claims ADD COLUMN released INTEGER NOT NULL DEFAULT 0;
+  ```
 
 Migration by host:
 
-- Agents' 13 Workers: re-pin adapter 0.7.0/core 0.4.0 on bsv-rs 0.7.0; drop the two crates from any sha2/hmac wrapper list in your deny.toml.
-- LOW's tower: re-pin adapter 0.7.0/core 0.4.0 on bsv-rs 0.7.0; drop the two crates from any sha2/hmac wrapper list in your deny.toml.
-- The relay's door: re-pin adapter 0.7.0/core 0.4.0 on bsv-rs 0.7.0; drop the two crates from any sha2/hmac wrapper list in your deny.toml.
-- Zanaadu's door: re-pin adapter 0.7.0/core 0.4.0 on bsv-rs 0.7.0; drop the two crates from any sha2/hmac wrapper list in your deny.toml.
-- wallet-infra: re-pin adapter 0.7.0/core 0.4.0 on bsv-rs 0.7.0; drop the two crates from any sha2/hmac wrapper list in your deny.toml.
-- The message box (canonical and mirror): re-pin adapter 0.7.0/core 0.4.0 on bsv-rs 0.7.0; drop the two crates from any sha2/hmac wrapper list in your deny.toml.
-- The template: re-pin adapter 0.7.0/core 0.4.0 on bsv-rs 0.7.0; drop the two crates from any sha2/hmac wrapper list in your deny.toml.
+- Agents' 13 Workers: run the D1 migration once, then move the 14 payment doors to `payment_prefix_gate` with their explicit fault posture and txid-bound releases; re-pin adapter 0.7.0/core 0.4.0 on bsv-rs 0.7.0; drop the two crates from any sha2/hmac wrapper list in your deny.toml. Pass a `PaymentPrefixStore` (D1 for exact enforcement), and run the migration once if using an existing shared claims table.
+- LOW's tower: re-pin adapter 0.7.0/core 0.4.0 on bsv-rs 0.7.0; drop the two crates from any sha2/hmac wrapper list in your deny.toml. Pass a `PaymentPrefixStore` (D1 for exact enforcement), and run the migration once if using an existing shared claims table.
+- The relay's door: re-pin adapter 0.7.0/core 0.4.0 on bsv-rs 0.7.0; drop the two crates from any sha2/hmac wrapper list in your deny.toml. Pass a `PaymentPrefixStore` (D1 for exact enforcement), and run the migration once if using an existing shared claims table.
+- Zanaadu's door: re-pin adapter 0.7.0/core 0.4.0 on bsv-rs 0.7.0; drop the two crates from any sha2/hmac wrapper list in your deny.toml. Pass a `PaymentPrefixStore` (D1 for exact enforcement), and run the migration once if using an existing shared claims table.
+- wallet-infra: re-pin adapter 0.7.0/core 0.4.0 on bsv-rs 0.7.0; drop the two crates from any sha2/hmac wrapper list in your deny.toml. Pass a `PaymentPrefixStore` (D1 for exact enforcement), and run the migration once if using an existing shared claims table.
+- The message box (canonical and mirror): re-pin adapter 0.7.0/core 0.4.0 on bsv-rs 0.7.0; drop the two crates from any sha2/hmac wrapper list in your deny.toml. Pass a `PaymentPrefixStore` (D1 for exact enforcement), and run the migration once if using an existing shared claims table.
+- The template: re-pin adapter 0.7.0/core 0.4.0 on bsv-rs 0.7.0; drop the two crates from any sha2/hmac wrapper list in your deny.toml. Pass a `PaymentPrefixStore` (D1 for exact enforcement), and run the migration once if using an existing shared claims table.
 
 ## Adapter 0.6.2 and core 0.3.2 - 2026-10-13
 

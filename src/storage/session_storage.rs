@@ -12,9 +12,8 @@
 //! The method set is exactly what the middleware requires: session lookup and
 //! persistence for the auth middleware
 //! ([`process_auth_with_storage`](crate::process_auth_with_storage) and its
-//! handshake helpers), plus single-use nonce consumption shared by the auth
-//! replay protection and the payment middleware
-//! ([`process_payment_with_storage`](crate::process_payment_with_storage)).
+//! handshake helpers), plus BRC-104 request nonce consumption. Payment prefixes
+//! require the separate `PaymentPrefixStore` contract.
 
 use crate::error::Result;
 use crate::types::StoredSession;
@@ -59,14 +58,8 @@ pub trait SessionStorage {
     /// fail closed; silently returning `Ok(true)` on a storage fault would
     /// disable replay protection.
     ///
-    /// Used for two kinds of single-use values:
-    /// - **BRC-104 per-request nonces** (`x-bsv-auth-nonce` on General
-    ///   messages), scoped by the server session nonce, with
-    ///   `ttl_seconds = Some(session TTL)`.
-    /// - **BRC-29 payment derivation prefixes**, scoped by
-    ///   [`PAYMENT_NONCE_SCOPE`](crate::middleware::payment::PAYMENT_NONCE_SCOPE),
-    ///   with `ttl_seconds = None` (the prefix HMAC never expires, so the
-    ///   consumption record must not either).
+    /// Used for BRC-104 per-request nonces, scoped by the server session nonce,
+    /// with `ttl_seconds = Some(session TTL)`. Never use for payment prefixes.
     ///
     /// # Consistency requirements
     ///
@@ -99,12 +92,8 @@ pub trait SessionStorage {
 
     /// Best-effort release of a previously consumed nonce.
     ///
-    /// The payment middleware calls this when `internalizeAction` fails with
-    /// a transport/wallet **error** (as opposed to an explicit
-    /// `accepted: false` rejection): the payment was not processed, so the
-    /// honest client must be able to retry the same payment. Releasing never
-    /// grants replay value — a released nonce still has to pass full
-    /// verification and wallet internalization again to be of any use.
+    /// Only for auth request nonces; payment-prefix release must retain a txid
+    /// binding through `PaymentPrefixStore::release_prefix`.
     async fn release_nonce(&self, scope: &str, nonce: &str) -> Result<()>;
 
     /// The hot path's two questions — "is this session live?" and "has this
@@ -402,20 +391,11 @@ mod tests {
         use bsv_middleware_core::PaymentNonceStore;
         let storage = MemorySessionStorage::default();
         let store = SessionNonceStore(&storage);
-        assert!(store
-            .try_consume(bsv_middleware_core::PAYMENT_NONCE_SCOPE, "p", None)
-            .await
-            .unwrap());
-        assert!(!store
-            .try_consume(bsv_middleware_core::PAYMENT_NONCE_SCOPE, "p", None)
-            .await
-            .unwrap());
-        assert!(storage.is_consumed(bsv_middleware_core::PAYMENT_NONCE_SCOPE, "p"));
-        store
-            .release(bsv_middleware_core::PAYMENT_NONCE_SCOPE, "p")
-            .await
-            .unwrap();
-        assert!(!storage.is_consumed(bsv_middleware_core::PAYMENT_NONCE_SCOPE, "p"));
+        assert!(store.try_consume("session", "p", None).await.unwrap());
+        assert!(!store.try_consume("session", "p", None).await.unwrap());
+        assert!(storage.is_consumed("session", "p"));
+        store.release("session", "p").await.unwrap();
+        assert!(!storage.is_consumed("session", "p"));
         storage.fail_consume(true);
         let err = store.try_consume("s", "n", Some(1)).await.unwrap_err();
         assert!(err.reason().contains("injected consume fault"), "{err}");

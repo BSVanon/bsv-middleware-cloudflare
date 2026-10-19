@@ -1,26 +1,17 @@
 //! The single-use stores as traits: a host implements them over its own
 //! backend (a KV namespace, a Durable Object, a SQL table, a map in a test).
 //!
-//! Two shapes, one idea: an atomic put-if-absent.
-//!
-//! - [`PaymentNonceStore`]: scoped single-use values (a BRC-104 per-request
-//!   nonce under its session, a BRC-29 derivation prefix under
-//!   [`PAYMENT_NONCE_SCOPE`]), consumed ONCE, released best-effort when the
-//!   step they guarded failed before taking effect.
-//! - [`ClaimStore`]: an unscoped claim keyed by one string, recorded with the
-//!   claiming agent, for hosts that run their own payment flow (a payment
-//!   nonce claimed after verification and before internalize) or need an
-//!   idempotency key (a refund issued at most once per payment).
-//!
-//! Both fail closed by contract: a storage fault is `Err`, never `Ok(true)`,
-//! so an outage can never disable replay protection. What a host does with
-//! the `Err` (refuse, or fall back to another guard) is its policy.
+//! Request nonces, idempotency keys and payment prefixes have separate contracts.
+//! [`PaymentNonceStore`] holds BRC-104 request nonces; [`ClaimStore`] holds
+//! idempotency keys (never derivation prefixes). [`PaymentPrefixStore`] binds
+//! a derivation prefix permanently to its first transaction (M14, BRC-105).
+//! All fail closed: a storage fault is `Err`, never a successful claim.
 
 use std::fmt;
 use std::future::Future;
 
-/// Nonce scope under which consumed BRC-29 payment derivation prefixes are
-/// recorded in a [`PaymentNonceStore`].
+/// Legacy KV namespace for payment derivation prefixes.
+#[deprecated(since = "0.4.0", note = "use PaymentPrefixStore for payment prefixes")]
 pub const PAYMENT_NONCE_SCOPE: &str = "payment-derivation-prefix";
 
 /// A storage fault. The store could not say whether the value was fresh.
@@ -47,14 +38,14 @@ impl fmt::Display for StoreError {
 
 impl std::error::Error for StoreError {}
 
-/// A store of consumed single-use values, scoped.
+/// A store of BRC-104 request nonces, scoped by session.
+/// Never use this trait for payment derivation prefixes.
 pub trait PaymentNonceStore {
     /// Records `nonce` (within `scope`) as consumed, once.
     ///
     /// `Ok(true)`: first use, proceed. `Ok(false)`: already recorded, a
     /// replay, reject. `Err`: the store could not answer; the caller fails
-    /// closed. `ttl_seconds = None` retains the record indefinitely (a
-    /// derivation prefix never expires, so neither may its consumption).
+    /// closed. `ttl_seconds = None` retains the record indefinitely.
     fn try_consume(
         &self,
         scope: &str,
@@ -68,7 +59,8 @@ pub trait PaymentNonceStore {
     fn release(&self, scope: &str, nonce: &str) -> impl Future<Output = Result<(), StoreError>>;
 }
 
-/// An atomic claim keyed by one string.
+/// An atomic idempotency claim keyed by one string, such as a refund-once key.
+/// Never use this trait for payment derivation prefixes.
 pub trait ClaimStore {
     /// Claim `key` for `agent` (recorded for diagnostics only).
     ///
@@ -80,13 +72,51 @@ pub trait ClaimStore {
     fn release(&self, key: &str) -> impl Future<Output = Result<(), StoreError>>;
 }
 
-/// An in-memory [`PaymentNonceStore`] and [`ClaimStore`]: a `HashSet`
+/// The result of claiming a permanently transaction-bound payment prefix.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PrefixClaim {
+    /// Fresh binding, or the bound transaction re-taking its released attempt.
+    Won,
+    /// The bound transaction already holds or has served this prefix.
+    SameTransaction,
+    /// Another transaction bound this prefix first, even if released.
+    OtherTransaction,
+    /// A legacy consumed record with no transaction binding. Refuse reuse.
+    Unknown,
+}
+
+/// A permanent binding from a BRC-29 derivation prefix to its first subject txid.
+///
+/// Claim atomically before any wallet call. Only the bound txid can re-take a
+/// released record. Held and served records refuse even that txid. Records
+/// never expire. Storage faults are `Err`; callers must fail closed.
+pub trait PaymentPrefixStore {
+    /// Claim `prefix` for `txid`; `agent` is diagnostic metadata only.
+    fn claim_prefix(
+        &self,
+        prefix: &str,
+        txid: &str,
+        agent: &str,
+    ) -> impl Future<Output = Result<PrefixClaim, StoreError>>;
+
+    /// Release only this txid's attempt after an internalize error. Retain
+    /// the binding forever; a different txid must never become eligible.
+    fn release_prefix(
+        &self,
+        prefix: &str,
+        txid: &str,
+    ) -> impl Future<Output = Result<(), StoreError>>;
+}
+
+/// An in-memory [`PaymentPrefixStore`], [`PaymentNonceStore`] and [`ClaimStore`].
+/// Prefixes use a map of `(txid, released)`; other keys use a `HashSet`
 /// insert, which is a genuine put-if-absent on one thread. For tests and
 /// single-process hosts; a fault can be injected to exercise fail-closed
 /// paths.
 #[derive(Default)]
 pub struct MemoryStore {
     seen: std::cell::RefCell<std::collections::HashSet<String>>,
+    prefixes: std::cell::RefCell<std::collections::HashMap<String, (String, bool)>>,
     fail: std::cell::Cell<bool>,
 }
 
@@ -108,12 +138,12 @@ impl MemoryStore {
 
     /// The number of recorded values, all scopes and claims.
     pub fn len(&self) -> usize {
-        self.seen.borrow().len()
+        self.seen.borrow().len() + self.prefixes.borrow().len()
     }
 
     /// Whether nothing is recorded.
     pub fn is_empty(&self) -> bool {
-        self.seen.borrow().is_empty()
+        self.len() == 0
     }
 
     fn put_if_absent(&self, key: String) -> Result<bool, StoreError> {
@@ -157,6 +187,44 @@ impl ClaimStore for MemoryStore {
     }
 }
 
+impl PaymentPrefixStore for MemoryStore {
+    async fn claim_prefix(
+        &self,
+        prefix: &str,
+        txid: &str,
+        _agent: &str,
+    ) -> Result<PrefixClaim, StoreError> {
+        if self.fail.get() {
+            return Err(StoreError::new("injected store fault"));
+        }
+        let mut prefixes = self.prefixes.borrow_mut();
+        match prefixes.get_mut(prefix) {
+            None => {
+                prefixes.insert(prefix.to_string(), (txid.to_string(), false));
+                Ok(PrefixClaim::Won)
+            }
+            Some((bound, _)) if bound != txid => Ok(PrefixClaim::OtherTransaction),
+            Some((_, released)) if *released => {
+                *released = false;
+                Ok(PrefixClaim::Won)
+            }
+            Some(_) => Ok(PrefixClaim::SameTransaction),
+        }
+    }
+
+    async fn release_prefix(&self, prefix: &str, txid: &str) -> Result<(), StoreError> {
+        if self.fail.get() {
+            return Err(StoreError::new("injected store fault"));
+        }
+        if let Some((bound, released)) = self.prefixes.borrow_mut().get_mut(prefix) {
+            if bound == txid {
+                *released = true;
+            }
+        }
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -193,7 +261,56 @@ mod tests {
         assert!(store.claim("prefix-2", "a").await.unwrap());
     }
 
+    #[tokio::test]
+    async fn a_prefix_binds_its_first_txid() {
+        let store = MemoryStore::new();
+        assert_eq!(
+            store.claim_prefix("p", "a", "agent").await.unwrap(),
+            PrefixClaim::Won
+        );
+        assert_eq!(
+            store.claim_prefix("p", "a", "agent").await.unwrap(),
+            PrefixClaim::SameTransaction
+        );
+        assert_eq!(
+            store.claim_prefix("p", "b", "agent").await.unwrap(),
+            PrefixClaim::OtherTransaction
+        );
+        store.fail(true);
+        assert!(store.claim_prefix("fresh", "b", "agent").await.is_err());
+        assert!(store.release_prefix("p", "a").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn a_released_prefix_is_retaken_by_its_own_txid_only() {
+        let store = MemoryStore::new();
+        assert_eq!(
+            store.claim_prefix("p", "a", "agent").await.unwrap(),
+            PrefixClaim::Won
+        );
+        store.release_prefix("p", "b").await.unwrap();
+        assert_eq!(
+            store.claim_prefix("p", "a", "agent").await.unwrap(),
+            PrefixClaim::SameTransaction
+        );
+        store.release_prefix("p", "a").await.unwrap();
+        assert_eq!(
+            store.claim_prefix("p", "b", "agent").await.unwrap(),
+            PrefixClaim::OtherTransaction
+        );
+        assert_eq!(
+            store.claim_prefix("p", "a", "agent").await.unwrap(),
+            PrefixClaim::Won
+        );
+        assert_eq!(
+            store.claim_prefix("p", "a", "agent").await.unwrap(),
+            PrefixClaim::SameTransaction
+        );
+        assert_eq!(store.len(), 1);
+    }
+
     #[test]
+    #[allow(deprecated)]
     fn store_error_names_its_reason() {
         let e = StoreError::new("kv 429");
         assert_eq!(e.reason(), "kv 429");

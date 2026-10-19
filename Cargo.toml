@@ -61,6 +61,7 @@ d1-claims = ["worker/d1"]
 all-features = true
 
 [dev-dependencies]
+rusqlite = { version = "0.38", default-features = false, features = ["bundled"] }
 tokio = { version = "1", features = ["rt", "macros"] }
 
 [profile.release]

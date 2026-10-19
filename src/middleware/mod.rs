@@ -15,8 +15,7 @@ pub use auth::{
 };
 #[allow(deprecated)]
 pub use multipart::prepare_multipart_payment;
-#[allow(deprecated)] // re-exported for backward compatibility
-pub use payment::process_payment;
+#[allow(deprecated)]
 pub use payment::{
     payment_headers, process_payment_with_storage, process_payment_with_storage_signed,
     PaymentMiddlewareOptions, PaymentResult, PAYMENT_NONCE_SCOPE,

@@ -16,10 +16,10 @@
 use crate::client::WorkerStorageClient;
 use crate::error::{AuthCloudflareError, Result};
 use crate::middleware::auth::{add_cors_headers, sign_json_response, AuthSession};
-use crate::storage::{KvSessionStorage, SessionStorage};
 use crate::types::{AuthContext, BsvPayment, ErrorResponse, PaymentContext};
 #[cfg(test)]
 use bsv_middleware_core::UnverifiableReason;
+use bsv_middleware_core::{payment_subject_txid, PaymentPrefixStore, PrefixClaim};
 use bsv_middleware_core::{verify_payment_output, PaymentFault, PaymentVerdict};
 use bsv_sdk::auth::utils::{create_nonce, verify_nonce};
 use bsv_sdk::primitives::{from_base64, PrivateKey};
@@ -47,9 +47,8 @@ pub mod payment_headers {
 const PAYMENT_VERSION: &str = "1.0";
 const ORIGINATOR: &str = "bsv-auth-cloudflare";
 
-/// Nonce scope under which consumed BRC-29 payment derivation prefixes are
-/// recorded in the [`SessionStorage`] nonce store
-/// (`bsv_middleware_core::store::PAYMENT_NONCE_SCOPE`).
+/// Legacy KV namespace. Payment replay protection uses [`PaymentPrefixStore`].
+#[allow(deprecated)]
 pub use bsv_middleware_core::store::PAYMENT_NONCE_SCOPE;
 
 /// The output of the payment transaction that is internalized (and read).
@@ -133,44 +132,10 @@ pub enum PaymentResult {
     Failed(Response),
 }
 
-/// Process payment for a request **without** single-use nonce tracking.
-///
-/// This is the original port of payment-express-middleware's
-/// `createPaymentMiddleware`, kept for backward compatibility. It now gates
-/// on the wallet's `accepted` flag (audit finding #44) but — like the TS
-/// reference — verifies the derivation prefix with a **stateless HMAC only**:
-/// nothing stops the same `X-BSV-Payment` header from being internalized
-/// again except the upstream wallet's own duplicate handling.
-///
-/// Use [`process_payment_with_storage`] instead, which additionally enforces
-/// single-use derivation prefixes through the pluggable [`SessionStorage`]
-/// nonce store.
-#[deprecated(
-    since = "0.3.0",
-    note = "stateless: payment derivation prefixes are not single-use (replay relies on the \
-            upstream wallet); use process_payment_with_storage"
-)]
-pub async fn process_payment<F>(
-    req: &Request,
-    auth_context: &AuthContext,
-    options: &PaymentMiddlewareOptions<F>,
-) -> Result<PaymentResult>
-where
-    F: Fn(&Request) -> u64,
-{
-    process_payment_inner(
-        req,
-        auth_context,
-        options,
-        Option::<&KvSessionStorage>::None,
-    )
-    .await
-}
-
 /// Process payment for a request, with single-use derivation prefixes.
 ///
 /// This is a port of payment-express-middleware's `createPaymentMiddleware`
-/// with two deliberate hardening divergences from the TS reference
+/// with deliberate hardening divergences from the TS reference
 /// (`@bsv/payment-express-middleware` 1.2.3), per audit finding #44:
 ///
 /// 1. **`accepted` gate.** The reference destructures `accepted` from
@@ -182,7 +147,7 @@ where
 ///    stateless HMAC check — a captured `X-BSV-Payment` header can be
 ///    internalized repeatedly (bounded only by the upstream wallet's
 ///    duplicate handling). Here, each verified prefix is consumed through
-///    [`SessionStorage::try_consume_nonce`] under [`PAYMENT_NONCE_SCOPE`]
+///    [`PaymentPrefixStore::claim_prefix`] bound to its first subject txid
 ///    with **no expiry** (the HMAC itself never expires); a reused prefix is
 ///    rejected with `400 ERR_INVALID_DERIVATION_PREFIX` before touching the
 ///    wallet.
@@ -225,10 +190,10 @@ where
 /// Consumption ordering (money path):
 /// - The prefix is consumed **before** `internalizeAction`, so concurrent
 ///   duplicates cannot both reach the wallet (subject to the storage
-///   backend's consistency — see [`KvSessionStorage::try_consume_nonce`] for
+///   backend's consistency; see [`crate::KvPrefixStore`] for
 ///   the KV residual window).
 /// - If `internalizeAction` fails with an **error**, the prefix is released
-///   (best-effort) so an honest client can retry the same real payment.
+///   (best-effort) only to the same txid, retaining its binding forever.
 /// - If the wallet returns **`accepted: false`** or the call succeeds, the
 ///   prefix stays consumed; the client must obtain a fresh 402 challenge.
 ///
@@ -240,13 +205,13 @@ pub async fn process_payment_with_storage<F, S>(
     req: &Request,
     auth_context: &AuthContext,
     options: &PaymentMiddlewareOptions<F>,
-    session_storage: &S,
+    prefixes: &S,
 ) -> Result<PaymentResult>
 where
     F: Fn(&Request) -> u64,
-    S: SessionStorage + ?Sized,
+    S: PaymentPrefixStore + ?Sized,
 {
-    process_payment_inner(req, auth_context, options, Some(session_storage)).await
+    process_payment_inner(req, auth_context, options, prefixes).await
 }
 
 /// [`process_payment_with_storage`] with BRC-104-signed responses.
@@ -261,12 +226,12 @@ pub async fn process_payment_with_storage_signed<F, S>(
     req: &Request,
     auth_context: &AuthContext,
     options: &PaymentMiddlewareOptions<F>,
-    session_storage: &S,
+    prefixes: &S,
     session: &AuthSession,
 ) -> Result<PaymentResult>
 where
     F: Fn(&Request) -> u64,
-    S: SessionStorage + ?Sized,
+    S: PaymentPrefixStore + ?Sized,
 {
     let payment_header = req.headers().get(payment_headers::PAYMENT).ok().flatten();
     let decision = decide_payment(
@@ -274,7 +239,7 @@ where
         || (options.calculate_price)(req),
         payment_header,
         &options.server_private_key,
-        Some(session_storage),
+        prefixes,
         |derivation_prefix, derivation_suffix, tx_bytes| async move {
             internalize_payment(
                 options,
@@ -290,8 +255,7 @@ where
     decision_into_result_signed(decision, session)
 }
 
-/// Shared implementation. `nonce_store: None` = legacy stateless behavior
-/// (deprecated [`process_payment`]); `Some(_)` = single-use enforcement.
+/// Shared implementation with mandatory transaction-bound prefix protection.
 ///
 /// Thin `worker::Request`/`Response` shell: extracts the price closure and
 /// `x-bsv-payment` header from the request, delegates every money-path
@@ -302,11 +266,11 @@ async fn process_payment_inner<F, S>(
     req: &Request,
     auth_context: &AuthContext,
     options: &PaymentMiddlewareOptions<F>,
-    nonce_store: Option<&S>,
+    prefixes: &S,
 ) -> Result<PaymentResult>
 where
     F: Fn(&Request) -> u64,
-    S: SessionStorage + ?Sized,
+    S: PaymentPrefixStore + ?Sized,
 {
     let payment_header = req.headers().get(payment_headers::PAYMENT).ok().flatten();
     let decision = decide_payment(
@@ -314,7 +278,7 @@ where
         || (options.calculate_price)(req),
         payment_header,
         &options.server_private_key,
-        nonce_store,
+        prefixes,
         |derivation_prefix, derivation_suffix, tx_bytes| async move {
             internalize_payment(
                 options,
@@ -357,8 +321,10 @@ enum PaymentDecision {
     InvalidPrefix,
     /// Derivation prefix was already consumed (single-use enforcement,
     /// audit #44) → 400 `ERR_INVALID_DERIVATION_PREFIX` "(already used)"
-    /// ([`PaymentResult::Failed`]). Only reachable with a nonce store.
+    /// ([`PaymentResult::Failed`]).
     ReplayedPrefix,
+    /// Another transaction already bound this prefix. 400, no fresh challenge.
+    PrefixUsedByAnotherTransaction,
     /// Wallet did not affirmatively accept (`accepted != true`) → 402
     /// `ERR_PAYMENT_FAILED` with a fresh challenge; the old prefix stays
     /// consumed ([`PaymentResult::Failed`]).
@@ -501,12 +467,12 @@ async fn decide_payment<P, S, I, Fut>(
     calculate_price: P,
     payment_header: Option<String>,
     server_private_key: &str,
-    nonce_store: Option<&S>,
+    prefixes: &S,
     internalize: I,
 ) -> Result<PaymentDecision>
 where
     P: FnOnce() -> u64,
-    S: SessionStorage + ?Sized,
+    S: PaymentPrefixStore + ?Sized,
     I: FnOnce(String, String, Vec<u8>) -> Fut,
     Fut: core::future::Future<Output = Result<serde_json::Value>>,
 {
@@ -597,19 +563,26 @@ where
         }
     };
 
-    // Step 6b (hardening divergence from the TS reference — audit #44):
-    // consume the derivation prefix BEFORE internalizing, so a
-    // captured X-BSV-Payment header cannot be internalized twice.
-    // No TTL: the HMAC prefix never expires, so its consumption
-    // record must not either. Storage errors fail closed (`?`).
-    if let Some(store) = nonce_store {
-        let fresh = store
-            .try_consume_nonce(PAYMENT_NONCE_SCOPE, &payment.derivation_prefix, None)
-            .await?;
-        if !fresh {
-            // Wire code matches the reference's invalid-prefix error;
-            // the description distinguishes reuse.
-            return Ok(PaymentDecision::ReplayedPrefix);
+    // M14: bind the subject before any wallet call. No expiry; faults fail closed.
+    let txid = match payment_subject_txid(&tx_bytes) {
+        Ok(txid) => txid,
+        Err(reason) => {
+            return Ok(PaymentDecision::InvalidPayment {
+                description: reason.to_string(),
+            })
+        }
+    };
+    match prefixes
+        .claim_prefix(&payment.derivation_prefix, &txid, ORIGINATOR)
+        .await
+        .map_err(|e| AuthCloudflareError::KvError(e.to_string()))?
+    {
+        PrefixClaim::Won => {}
+        PrefixClaim::SameTransaction | PrefixClaim::Unknown => {
+            return Ok(PaymentDecision::ReplayedPrefix)
+        }
+        PrefixClaim::OtherTransaction => {
+            return Ok(PaymentDecision::PrefixUsedByAnotherTransaction)
         }
     }
 
@@ -649,22 +622,13 @@ where
             })
         }
         Err(e) => {
-            // The payment was NOT processed to acceptance — release
-            // the consumed prefix (best-effort) so an honest client
-            // can retry the same real payment after a transient
-            // fault. If the failure was actually post-internalize
-            // (response lost), the retry hits the upstream wallet's
-            // own duplicate handling — same reliance as the TS
-            // reference's only line of defense.
-            if let Some(store) = nonce_store {
-                if let Err(release_err) = store
-                    .release_nonce(PAYMENT_NONCE_SCOPE, &payment.derivation_prefix)
-                    .await
-                {
-                    warn_log(&format!(
-                        "payment nonce release failed (prefix stays consumed; client must re-challenge): {release_err:?}"
-                    ));
-                }
+            // Retain the binding even on an ambiguous wallet error: only this
+            // transaction may retry, subject to the wallet's duplicate handling.
+            if let Err(release_err) = prefixes
+                .release_prefix(&payment.derivation_prefix, &txid)
+                .await
+            {
+                warn_log(&format!("payment prefix release failed: {release_err}"));
             }
 
             // Express: catch(err) => res.status(400).json({ code: err.code ?? 'ERR_PAYMENT_FAILED', description: err.message ?? 'Payment failed.' })
@@ -721,6 +685,11 @@ fn decision_into_result(decision: PaymentDecision) -> Result<PaymentResult> {
             400,
             "ERR_INVALID_DERIVATION_PREFIX",
             "The X-BSV-Payment-Derivation-Prefix header is not valid (already used).",
+        ),
+        PaymentDecision::PrefixUsedByAnotherTransaction => failed_json_response(
+            400,
+            "ERR_INVALID_DERIVATION_PREFIX",
+            "The derivation prefix was already used by another transaction (BRC-105: each prefix pays once). Nothing was internalized; request a fresh challenge.",
         ),
         PaymentDecision::WalletRejected {
             price,
@@ -817,6 +786,11 @@ fn decision_into_result_signed(
             400,
             "ERR_INVALID_DERIVATION_PREFIX",
             "The X-BSV-Payment-Derivation-Prefix header is not valid (already used).",
+        ),
+        PaymentDecision::PrefixUsedByAnotherTransaction => signed_failed(
+            400,
+            "ERR_INVALID_DERIVATION_PREFIX",
+            "The derivation prefix was already used by another transaction (BRC-105: each prefix pays once). Nothing was internalized; request a fresh challenge.",
         ),
         PaymentDecision::WalletRejected {
             price,
@@ -1252,6 +1226,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(deprecated)]
     fn test_payment_nonce_scope_constant() {
         // Consumed derivation prefixes are recorded under this scope in the
         // SessionStorage nonce store; changing it orphans consumption records.
@@ -1541,7 +1516,54 @@ mod tests {
 
     mod decide {
         use super::*;
-        use crate::storage::session_storage::MemorySessionStorage;
+        use bsv_middleware_core::{MemoryStore, StoreError};
+
+        #[derive(Default)]
+        struct TestPrefixes {
+            inner: MemoryStore,
+            held: std::cell::RefCell<std::collections::HashSet<String>>,
+            fail_release: std::cell::Cell<bool>,
+        }
+        impl TestPrefixes {
+            fn is_consumed(&self, prefix: &str) -> bool {
+                self.held.borrow().contains(prefix)
+            }
+            fn consumed_count(&self) -> usize {
+                self.held.borrow().len()
+            }
+            fn fail_consume(&self, fail: bool) {
+                self.inner.fail(fail);
+            }
+            fn fail_release(&self, fail: bool) {
+                self.fail_release.set(fail);
+            }
+        }
+        impl PaymentPrefixStore for TestPrefixes {
+            async fn claim_prefix(
+                &self,
+                prefix: &str,
+                txid: &str,
+                agent: &str,
+            ) -> std::result::Result<PrefixClaim, StoreError> {
+                let result = self.inner.claim_prefix(prefix, txid, agent).await?;
+                if result == PrefixClaim::Won {
+                    self.held.borrow_mut().insert(prefix.to_string());
+                }
+                Ok(result)
+            }
+            async fn release_prefix(
+                &self,
+                prefix: &str,
+                txid: &str,
+            ) -> std::result::Result<(), StoreError> {
+                if self.fail_release.get() {
+                    return Err(StoreError::new("release fault"));
+                }
+                self.inner.release_prefix(prefix, txid).await?;
+                self.held.borrow_mut().remove(prefix);
+                Ok(())
+            }
+        }
         use crate::types::AuthContext;
 
         /// The paying client's identity key: 2·G, a point on the curve
@@ -1569,6 +1591,37 @@ mod tests {
         /// A payment of exactly the price to the server's derived key.
         fn header_for(prefix: &str) -> Option<String> {
             header_paying(prefix, &[(PRICE, derived_script(prefix))])
+        }
+
+        fn other_transaction(prefix: &str) -> Option<String> {
+            header_paying(prefix, &[(PRICE + 1, derived_script(prefix))])
+        }
+
+        #[tokio::test]
+        async fn a_prefix_reused_with_a_new_transaction_is_refused_before_the_wallet() {
+            let store = TestPrefixes::default();
+            let prefix = issued_prefix().await;
+            let first = header_for(&prefix);
+            let second = other_transaction(&prefix);
+            let txid = |header: &Option<String>| {
+                let payment: BsvPayment = serde_json::from_str(header.as_ref().unwrap()).unwrap();
+                payment_subject_txid(&from_base64(&payment.transaction).unwrap()).unwrap()
+            };
+            assert_ne!(txid(&first), txid(&second));
+            let calls = std::cell::Cell::new(0);
+            let wallet = |_, _, _| {
+                calls.set(calls.get() + 1);
+                async { Ok(serde_json::json!({ "accepted": true })) }
+            };
+            let first = decide_payment(&auth(), || PRICE, first, TEST_KEY_HEX, &store, wallet)
+                .await
+                .unwrap();
+            assert!(matches!(first, PaymentDecision::Verified { .. }));
+            let second = decide_payment(&auth(), || PRICE, second, TEST_KEY_HEX, &store, wallet)
+                .await
+                .unwrap();
+            assert_eq!(second, PaymentDecision::PrefixUsedByAnotherTransaction);
+            assert_eq!(calls.get(), 1);
         }
 
         fn exact_payment_b64(prefix: &str) -> String {
@@ -1624,7 +1677,7 @@ mod tests {
                     || -> u64 { panic!("price must not be calculated without auth") },
                     None,
                     TEST_KEY_HEX,
-                    Option::<&MemorySessionStorage>::None,
+                    &TestPrefixes::default(),
                     wallet_unreachable,
                 )
                 .await
@@ -1637,13 +1690,13 @@ mod tests {
         async fn price_zero_is_free_before_header_inspection() {
             // Express short-circuits on requestPrice === 0 before ever
             // reading x-bsv-payment — even a garbage header passes.
-            let store = MemorySessionStorage::default();
+            let store = TestPrefixes::default();
             let decision = decide_payment(
                 &auth(),
                 || 0,
                 Some("garbage, never parsed".to_string()),
                 TEST_KEY_HEX,
-                Some(&store),
+                &store,
                 wallet_unreachable,
             )
             .await
@@ -1654,13 +1707,13 @@ mod tests {
 
         #[tokio::test]
         async fn missing_header_yields_verifiable_challenge() {
-            let store = MemorySessionStorage::default();
+            let store = TestPrefixes::default();
             let decision = decide_payment(
                 &auth(),
                 || PRICE,
                 None,
                 TEST_KEY_HEX,
-                Some(&store),
+                &store,
                 wallet_unreachable,
             )
             .await
@@ -1685,13 +1738,13 @@ mod tests {
 
         #[tokio::test]
         async fn malformed_header_rejected_without_store_writes() {
-            let store = MemorySessionStorage::default();
+            let store = TestPrefixes::default();
             let decision = decide_payment(
                 &auth(),
                 || PRICE,
                 Some("not json".to_string()),
                 TEST_KEY_HEX,
-                Some(&store),
+                &store,
                 wallet_unreachable,
             )
             .await
@@ -1702,13 +1755,13 @@ mod tests {
 
         #[tokio::test]
         async fn foreign_prefix_fails_hmac_before_store_and_wallet() {
-            let store = MemorySessionStorage::default();
+            let store = TestPrefixes::default();
             let decision = decide_payment(
                 &auth(),
                 || PRICE,
                 header_for("bm90LWEtcmVhbC1ub25jZQ=="),
                 TEST_KEY_HEX,
-                Some(&store),
+                &store,
                 wallet_unreachable,
             )
             .await
@@ -1721,7 +1774,7 @@ mod tests {
         async fn bad_base64_tx_errs_without_burning_the_prefix() {
             // Decode happens BEFORE consumption: a malformed payload must
             // not burn the client's one-shot derivation prefix.
-            let store = MemorySessionStorage::default();
+            let store = TestPrefixes::default();
             let prefix = issued_prefix().await;
             let header = serde_json::json!({
                 "derivationPrefix": prefix,
@@ -1734,7 +1787,7 @@ mod tests {
                 || PRICE,
                 Some(header),
                 TEST_KEY_HEX,
-                Some(&store),
+                &store,
                 wallet_unreachable,
             )
             .await
@@ -1744,14 +1797,14 @@ mod tests {
                 "expected MalformedPayment, got {err:?}"
             );
             assert!(
-                !store.is_consumed(PAYMENT_NONCE_SCOPE, &prefix),
+                !store.is_consumed(&prefix),
                 "prefix must survive a malformed transaction payload"
             );
         }
 
         #[tokio::test]
         async fn prefix_is_consumed_before_the_wallet_is_called() {
-            let store = MemorySessionStorage::default();
+            let store = TestPrefixes::default();
             let prefix = issued_prefix().await;
             let wallet_called = std::cell::Cell::new(false);
             let decision = decide_payment(
@@ -1759,7 +1812,7 @@ mod tests {
                 || PRICE,
                 header_for(&prefix),
                 TEST_KEY_HEX,
-                Some(&store),
+                &store,
                 |seen_prefix: String, seen_suffix: String, tx: Vec<u8>| {
                     wallet_called.set(true);
                     assert_eq!(seen_prefix, prefix);
@@ -1770,7 +1823,7 @@ mod tests {
                         "decoded base64 of the payment"
                     );
                     assert!(
-                        store.is_consumed(PAYMENT_NONCE_SCOPE, &prefix),
+                        store.is_consumed(&prefix),
                         "prefix must already be consumed when internalize runs \
                          (concurrent duplicates must not both reach the wallet)"
                     );
@@ -1791,14 +1844,14 @@ mod tests {
 
         #[tokio::test]
         async fn redeemed_header_replay_is_rejected_before_the_wallet() {
-            let store = MemorySessionStorage::default();
+            let store = TestPrefixes::default();
             let prefix = issued_prefix().await;
             let first = decide_payment(
                 &auth(),
                 || PRICE,
                 header_for(&prefix),
                 TEST_KEY_HEX,
-                Some(&store),
+                &store,
                 wallet_accepts,
             )
             .await
@@ -1813,7 +1866,7 @@ mod tests {
                 || PRICE,
                 header_for(&prefix),
                 TEST_KEY_HEX,
-                Some(&store),
+                &store,
                 wallet_unreachable,
             )
             .await
@@ -1823,14 +1876,14 @@ mod tests {
 
         #[tokio::test]
         async fn wallet_rejection_keeps_prefix_consumed_and_issues_fresh_challenge() {
-            let store = MemorySessionStorage::default();
+            let store = TestPrefixes::default();
             let prefix = issued_prefix().await;
             let decision = decide_payment(
                 &auth(),
                 || PRICE,
                 header_for(&prefix),
                 TEST_KEY_HEX,
-                Some(&store),
+                &store,
                 wallet_rejects,
             )
             .await
@@ -1850,7 +1903,7 @@ mod tests {
                 other => panic!("expected WalletRejected, got {other:?}"),
             }
             assert!(
-                store.is_consumed(PAYMENT_NONCE_SCOPE, &prefix),
+                store.is_consumed(&prefix),
                 "a wallet-REJECTED payment's prefix stays consumed"
             );
 
@@ -1860,26 +1913,37 @@ mod tests {
                 || PRICE,
                 header_for(&prefix),
                 TEST_KEY_HEX,
-                Some(&store),
+                &store,
                 wallet_unreachable,
             )
             .await
             .unwrap();
             assert_eq!(retry, PaymentDecision::ReplayedPrefix);
+            let other = decide_payment(
+                &auth(),
+                || PRICE,
+                other_transaction(&prefix),
+                TEST_KEY_HEX,
+                &store,
+                wallet_unreachable,
+            )
+            .await
+            .unwrap();
+            assert_eq!(other, PaymentDecision::PrefixUsedByAnotherTransaction);
         }
 
         #[tokio::test]
         async fn missing_accepted_field_fails_closed_end_to_end() {
             // internalize_accepted's fail-closed contract, executed through
             // the full decision path: no `accepted: true`, no Verified.
-            let store = MemorySessionStorage::default();
+            let store = TestPrefixes::default();
             let prefix = issued_prefix().await;
             let decision = decide_payment(
                 &auth(),
                 || PRICE,
                 header_for(&prefix),
                 TEST_KEY_HEX,
-                Some(&store),
+                &store,
                 |_p: String, _s: String, _t: Vec<u8>| async {
                     Ok(serde_json::json!({ "satoshisPaid": PRICE }))
                 },
@@ -1890,16 +1954,20 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn wallet_error_releases_prefix_so_honest_retry_succeeds() {
-            let store = MemorySessionStorage::default();
+        async fn an_internalize_error_releases_the_prefix_to_its_own_transaction_only() {
+            let store = TestPrefixes::default();
             let prefix = issued_prefix().await;
+            let calls = std::cell::Cell::new(0);
             let decision = decide_payment(
                 &auth(),
                 || PRICE,
                 header_for(&prefix),
                 TEST_KEY_HEX,
-                Some(&store),
-                wallet_errors,
+                &store,
+                |p, s, t| {
+                    calls.set(calls.get() + 1);
+                    wallet_errors(p, s, t)
+                },
             )
             .await
             .unwrap();
@@ -1913,8 +1981,25 @@ mod tests {
                 other => panic!("expected InternalizeError, got {other:?}"),
             }
             assert!(
-                !store.is_consumed(PAYMENT_NONCE_SCOPE, &prefix),
+                !store.is_consumed(&prefix),
                 "prefix released after a wallet ERROR (payment not processed)"
+            );
+
+            let other = decide_payment(
+                &auth(),
+                || PRICE,
+                other_transaction(&prefix),
+                TEST_KEY_HEX,
+                &store,
+                wallet_unreachable,
+            )
+            .await
+            .unwrap();
+            assert_eq!(other, PaymentDecision::PrefixUsedByAnotherTransaction);
+            assert_eq!(
+                calls.get(),
+                1,
+                "refused transaction never reaches the wallet"
             );
 
             // The honest client retries the SAME real payment and succeeds.
@@ -1923,17 +2008,21 @@ mod tests {
                 || PRICE,
                 header_for(&prefix),
                 TEST_KEY_HEX,
-                Some(&store),
-                wallet_accepts,
+                &store,
+                |p, s, t| {
+                    calls.set(calls.get() + 1);
+                    wallet_accepts(p, s, t)
+                },
             )
             .await
             .unwrap();
             assert!(matches!(retry, PaymentDecision::Verified { .. }));
+            assert_eq!(calls.get(), 2);
         }
 
         #[tokio::test]
         async fn release_failure_is_best_effort_error_still_reported() {
-            let store = MemorySessionStorage::default();
+            let store = TestPrefixes::default();
             let prefix = issued_prefix().await;
             store.fail_release(true);
             let decision = decide_payment(
@@ -1941,14 +2030,14 @@ mod tests {
                 || PRICE,
                 header_for(&prefix),
                 TEST_KEY_HEX,
-                Some(&store),
+                &store,
                 wallet_errors,
             )
             .await
             .unwrap();
             assert!(matches!(decision, PaymentDecision::InternalizeError { .. }));
             assert!(
-                store.is_consumed(PAYMENT_NONCE_SCOPE, &prefix),
+                store.is_consumed(&prefix),
                 "when release fails the prefix stays consumed (client must re-challenge)"
             );
         }
@@ -1957,7 +2046,7 @@ mod tests {
         async fn store_fault_during_consume_fails_closed() {
             // A storage fault must surface as Err (→ 500 ERR_STORAGE), never
             // silently disable replay protection.
-            let store = MemorySessionStorage::default();
+            let store = TestPrefixes::default();
             let prefix = issued_prefix().await;
             store.fail_consume(true);
             let err = decide_payment(
@@ -1965,7 +2054,7 @@ mod tests {
                 || PRICE,
                 header_for(&prefix),
                 TEST_KEY_HEX,
-                Some(&store),
+                &store,
                 wallet_unreachable,
             )
             .await
@@ -1974,28 +2063,6 @@ mod tests {
                 matches!(err, AuthCloudflareError::KvError(_)),
                 "expected KvError, got {err:?}"
             );
-        }
-
-        #[tokio::test]
-        async fn stateless_path_still_permits_replay() {
-            // The deprecated process_payment (nonce_store: None) semantics —
-            // the boundary the storage worker's #[allow(deprecated)] shim
-            // sat on until audit finding #62: a byte-identical replay reaches
-            // the wallet again, bounded only by its duplicate handling.
-            let prefix = issued_prefix().await;
-            for _ in 0..2 {
-                let decision = decide_payment(
-                    &auth(),
-                    || PRICE,
-                    header_for(&prefix),
-                    TEST_KEY_HEX,
-                    Option::<&MemorySessionStorage>::None,
-                    wallet_accepts,
-                )
-                .await
-                .unwrap();
-                assert!(matches!(decision, PaymentDecision::Verified { .. }));
-            }
         }
 
         // ---- P0-3b: the paying output is compared with the price ----
@@ -2078,7 +2145,7 @@ mod tests {
         async fn decide_crafted(
             outputs: impl FnOnce(&str) -> Vec<(u64, Vec<u8>)>,
         ) -> (PaymentDecision, usize) {
-            let store = MemorySessionStorage::default();
+            let store = TestPrefixes::default();
             let prefix = issued_prefix().await;
             let calls = AtomicUsize::new(0);
             let decision = decide_payment(
@@ -2086,7 +2153,7 @@ mod tests {
                 || PRICE,
                 header_paying(&prefix, &outputs(&prefix)),
                 TEST_KEY_HEX,
-                Some(&store),
+                &store,
                 |_prefix: String, _suffix: String, _tx: Vec<u8>| {
                     calls.fetch_add(1, Ordering::SeqCst);
                     async { Ok(serde_json::json!({ "accepted": true })) }
@@ -2171,7 +2238,7 @@ mod tests {
 
         #[tokio::test]
         async fn p0_3b_unreadable_transaction_is_invalid_and_keeps_the_prefix() {
-            let store = MemorySessionStorage::default();
+            let store = TestPrefixes::default();
             let prefix = issued_prefix().await;
             let header = serde_json::json!({
                 "derivationPrefix": prefix,
@@ -2184,7 +2251,7 @@ mod tests {
                 || PRICE,
                 Some(header),
                 TEST_KEY_HEX,
-                Some(&store),
+                &store,
                 wallet_unreachable,
             )
             .await
@@ -2193,19 +2260,19 @@ mod tests {
                 matches!(decision, PaymentDecision::InvalidPayment { .. }),
                 "{decision:?}"
             );
-            assert!(!store.is_consumed(PAYMENT_NONCE_SCOPE, &prefix));
+            assert!(!store.is_consumed(&prefix));
         }
 
         #[tokio::test]
         async fn p0_3b_a_refused_payment_keeps_the_prefix_for_a_correct_retry() {
-            let store = MemorySessionStorage::default();
+            let store = TestPrefixes::default();
             let prefix = issued_prefix().await;
             let short = decide_payment(
                 &auth(),
                 || PRICE,
                 header_paying(&prefix, &[(PRICE - 1, derived_script(&prefix))]),
                 TEST_KEY_HEX,
-                Some(&store),
+                &store,
                 wallet_unreachable,
             )
             .await
@@ -2214,13 +2281,13 @@ mod tests {
                 matches!(short, PaymentDecision::NotCovered { .. }),
                 "{short:?}"
             );
-            assert!(!store.is_consumed(PAYMENT_NONCE_SCOPE, &prefix));
+            assert!(!store.is_consumed(&prefix));
             let paid = decide_payment(
                 &auth(),
                 || PRICE,
                 header_for(&prefix),
                 TEST_KEY_HEX,
-                Some(&store),
+                &store,
                 wallet_accepts,
             )
             .await

@@ -181,3 +181,14 @@ Common error scenarios:
 - `../types.rs` - Data structures (`StoredSession`, `StoredPayment`)
 - `../error.rs` - Error types (`AuthCloudflareError`, `Result`)
 - Cloudflare Workers KV documentation for underlying storage semantics
+
+## Payment prefix storage (M14, adapter 0.7.0)
+
+Payment entry points require `PaymentPrefixStore`, separate from auth sessions.
+`D1PrefixStore` is exact: a prefix binds its first txid forever, and only that
+txid can re-take a released attempt. Run `PAYMENT_CLAIMS_MIGRATION` once before
+deploying against existing tables. `KvPrefixStore(&KvSessionStorage)` retains
+G3: read/write races and cross-edge propagation (about 60 seconds); values are
+`txid` or `released:txid`, never deleted or expired. Legacy `1` is closed.
+The DO session backend no longer routes payment scope to KV. `ClaimStore` and
+`claim_payment_nonce` are only for idempotency keys, never payment prefixes.

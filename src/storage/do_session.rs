@@ -20,9 +20,8 @@
 //! KV write. Cloudflare KV stays the COLD path: the identity → session index
 //! (the handshake writes it; the no-session-nonce lookup reads it), the cold
 //! copy a DO miss falls back to (a session minted under the KV backend before
-//! a rollout is migrated into its object on first sight), and the PAYMENT
-//! nonce scope (`PAYMENT_NONCE_SCOPE` is global, not per session — it stays
-//! where a global put-if-absent lives).
+//! a rollout is migrated into its object on first sight). Payment prefixes
+//! require a separate PaymentPrefixStore and never route through this backend.
 //!
 //! The reference (`auth-express-middleware`) keeps sessions in process memory;
 //! a Durable Object is that memory's durable, single-writer equivalent. The
@@ -247,19 +246,14 @@ impl SessionCell {
 pub enum ScopeRoute {
     /// A session nonce: its own Durable Object.
     Do,
-    /// A global scope (the BRC-29 payment prefix): Cloudflare KV.
+    /// Legacy route variant; no scope routes here since M14.
     Kv,
 }
 
-/// The auth middleware consumes request nonces under the SESSION nonce as the
-/// scope; the payment middleware under the global `PAYMENT_NONCE_SCOPE`. Only
-/// the former has an object to live in.
-pub fn route_scope(scope: &str) -> ScopeRoute {
-    if scope == crate::middleware::payment::PAYMENT_NONCE_SCOPE {
-        ScopeRoute::Kv
-    } else {
-        ScopeRoute::Do
-    }
+/// Every session nonce scope lives in its Durable Object. Payment prefixes
+/// use a separate `PaymentPrefixStore`, never this route.
+pub fn route_scope(_scope: &str) -> ScopeRoute {
+    ScopeRoute::Do
 }
 
 /// `PUT /session` body.
@@ -599,7 +593,7 @@ impl SessionStorage for DoSessionStorage {
         ttl_seconds: Option<u64>,
     ) -> Result<bool> {
         match route_scope(scope) {
-            ScopeRoute::Kv => self.kv.try_consume_nonce(scope, nonce, ttl_seconds).await,
+            ScopeRoute::Kv => unreachable!("nonce scopes use Durable Objects"),
             ScopeRoute::Do => {
                 let body = serde_json::to_string(&NonceBody {
                     nonce: nonce.to_string(),
@@ -668,7 +662,7 @@ impl SessionStorage for DoSessionStorage {
 
     async fn release_nonce(&self, scope: &str, nonce: &str) -> Result<()> {
         match route_scope(scope) {
-            ScopeRoute::Kv => self.kv.release_nonce(scope, nonce).await,
+            ScopeRoute::Kv => unreachable!("nonce scopes use Durable Objects"),
             ScopeRoute::Do => {
                 let body = serde_json::to_string(&NonceBody {
                     nonce: nonce.to_string(),
@@ -1044,11 +1038,8 @@ mod tests {
     }
 
     #[test]
-    fn only_the_payment_scope_stays_in_kv() {
-        assert_eq!(
-            route_scope(crate::middleware::payment::PAYMENT_NONCE_SCOPE),
-            ScopeRoute::Kv
-        );
+    fn all_nonce_scopes_use_their_durable_object() {
+        assert_eq!(route_scope("payment-derivation-prefix"), ScopeRoute::Do);
         assert_eq!(route_scope(&"ab".repeat(24)), ScopeRoute::Do);
         assert_eq!(route_scope("anything-else"), ScopeRoute::Do);
     }

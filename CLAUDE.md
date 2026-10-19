@@ -7,8 +7,7 @@ adapted for the Workers runtime (KV for state, async everywhere, explicit respon
 **Detailed module-level docs are in `src/CLAUDE.md`.** This file is a quick orientation.
 
 Since 0.4.0 this is a two-crate workspace: `core/` is `bsv-middleware-core` (the runtime-free rules: no worker,
-no fetch, no KV/DO/D1, no clock; 0.4.0), and the root crate is the Workers adapter over it (0.7.0). Every 0.3 public
-item of the adapter keeps its name, path and signature; `src/api_surface_tests.rs` pins the fleet's call shapes.
+no fetch, no KV/DO/D1, no clock; 0.4.0), and the root crate is the Workers adapter over it (0.7.0). M14 removes deprecated `process_payment` and requires a `PaymentPrefixStore` for payment entry points; other retained public items keep their paths. `src/api_surface_tests.rs` pins the fleet's call shapes.
 Since 0.5.0 the payment is read through bsv-rs 0.4's streaming reader with the scripts run, and nothing is refused
 for its size or its counts (the posture of 2026-10-09, "a BEEF of any size"): no limit, no 413, no `BeefLimits`.
 Since 0.5.1 (core 0.2.1) the floor is bsv-rs 0.4.1: a raw transaction with no input is the reader's invalid bytes
@@ -50,7 +49,7 @@ core/src/                — bsv-middleware-core (no runtime dependency)
 ├── payment_verify.rs   — verify_brc29_payment / verify_brc29_payment_verified (ONE pass through bsv-rs 0.4's
 │                         verify_stream with every root granted, a Tap judging the subject's output as the bytes
 │                         pass, then the roots asked of the service), verify_brc29_payment_structural_only
-├── store.rs            — PaymentNonceStore + ClaimStore traits, MemoryStore, PAYMENT_NONCE_SCOPE
+├── store.rs            : PaymentPrefixStore + PrefixClaim, auth PaymentNonceStore, idempotency ClaimStore, MemoryStore
 ├── brc104.rs           — auth_headers, HttpRequestData/HttpResponseData, payloads, varint, signable filters
 ├── auth.rs             — SessionBinding, sign/verify, identity binding, handshake replies, response signing
 ├── session_lane.rs     — the lane's rules (moved whole)
@@ -70,8 +69,7 @@ src/                     — bsv-middleware-cloudflare (the Workers adapter)
 │   ├── session_lane.rs — re-export of the core's lane; session_lane_tests.rs keeps the suite
 │   ├── payment.rs      — process_payment_with_storage() (the paying output judged from the
 │   │                     core's words: payer-side Unverifiable 400, server-side 503, a fault 500;
-│   │                     accepted gate, single-use prefixes), deprecated stateless
-│   │                     process_payment(), 402 builder
+│   │                     accepted gate, permanent txid-bound prefixes), 402 builder
 │   └── multipart.rs    — BRC-105 multipart payment transport parsing
 ├── storage/
 │   ├── session_storage.rs — SessionStorage trait (sessions + single-use nonce store);
@@ -88,7 +86,7 @@ src/                     — bsv-middleware-cloudflare (the Workers adapter)
 │                         verify_brc29_payment_verified (VerifiedPayment { satoshis, txid }); UrlHeaderService
 │                         (the 0.3.6 URL gate + Workers fetch), PaymentVerifyError (is_server_side),
 │                         accept_verdict (the one match from the six words; only Verified is Ok)
-├── payment_claims.rs   — feature `d1-claims`: atomic single-use payment-nonce claim on D1; D1ClaimStore
+├── payment_claims.rs   : feature `d1-claims`: exact D1PrefixStore, fleet prefix gate, idempotency D1ClaimStore
 ├── refund/             — feature-gated BRC-41 refund builder (issue_refund); signer re-exported from the core
 ├── api_surface_tests.rs — the 0.3 surface pinned as call sites (cfg(test))
 └── utils/
@@ -147,15 +145,21 @@ src/                     — bsv-middleware-cloudflare (the Workers adapter)
   checked through v2.0.13) never records consumed per-request nonces; this crate
   consumes `(session_nonce, x-bsv-auth-nonce)` via `SessionStorage::try_consume_nonce`
   after signature verification and 401s reuse with `ERR_REPLAYED_REQUEST`. Payment
-  derivation prefixes are likewise single-use: consumed (no expiry) *before*
-  internalize, kept consumed on `accepted:false`, released best-effort on internalize
-  *error* only. Residual window under eventually-consistent KV is documented in the
-  `middleware/auth.rs` module docs and `KvSessionStorage::try_consume_nonce`.
+  derivation prefixes bind their first subject txid permanently through `PaymentPrefixStore`
+  before any wallet call (M14, BRC-105). Another transaction gets 400
+  `ERR_INVALID_DERIVATION_PREFIX`, no fresh challenge, no internalize or refund.
+  A held or served record refuses its own txid too. An internalize error releases
+  only that txid's attempt; wallet rejection keeps it held. `D1PrefixStore` is exact;
+  `KvPrefixStore` retains G3 (same-edge races and about 60 seconds of propagation).
+  Run `PAYMENT_CLAIMS_MIGRATION` once before deploying against an existing table.
+  Fleet doors use `payment_prefix_gate` with explicit `FaultPosture`; closed faults
+  return 503 `ERR_PAYMENT_LOCK_UNAVAILABLE`, retryable, quote kept. Open returns
+  fault detail for the door to log. No refusal body names a txid.
 - **`accepted` gate on internalize** (audit #44). `PaymentResult::Verified` implies the
   wallet affirmatively returned `accepted: true`; anything else 402s with a fresh
   challenge. The TS reference calls `next()` regardless of `accepted`.
-- **`process_payment` is deprecated** (stateless — no single-use prefixes). Use
-  `process_payment_with_storage`; the `SessionStorage` doubles as the nonce store.
+- **`process_payment` is removed in 0.7.0.** `process_payment_with_storage{,_signed}`
+  takes `PaymentPrefixStore`; auth `SessionStorage` no longer doubles as a payment store.
 - **Never update `peer_nonce` for General messages.** The TS SDK sets `peerNonce`
   once at handshake and treats the per-message nonce as random. Storing the
   per-message nonce breaks `yourNonce` verification and kills the AuthFetch promise.
@@ -210,4 +214,4 @@ Payment: `x-bsv-payment`, `x-bsv-payment-version`, `x-bsv-payment-satoshis-requi
 
 ## The Durable Object session backend (0.3.3)
 
-`storage/do_session.rs`: one `AuthSessionStore` object per session nonce holds the session record and the consumed per-request nonces (an atomic put-if-absent, no KV write per request); KV stays the cold path (the identity index, a KV-minted session migrated on first sight, the payment scope). Adopt with `process_auth_do(req, &env, &options, "AUTH_SESSION_STORE")`, a DO binding + migration in the worker's wrangler, and `pub use bsv_middleware_cloudflare::AuthSessionStore;` in the worker crate. The pure `SessionCell` and `route_scope` are unit-pinned.
+`storage/do_session.rs`: one `AuthSessionStore` object per session nonce holds the session record and the consumed per-request nonces (an atomic put-if-absent, no KV write per request); KV stays the cold path (the identity index, a KV-minted session migrated on first sight, never payment prefixes). Adopt with `process_auth_do(req, &env, &options, "AUTH_SESSION_STORE")`, a DO binding + migration in the worker's wrangler, and `pub use bsv_middleware_cloudflare::AuthSessionStore;` in the worker crate. The pure `SessionCell` and `route_scope` are unit-pinned.

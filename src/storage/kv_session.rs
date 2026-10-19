@@ -278,8 +278,8 @@ impl KvSessionStorage {
     /// at-most-once semantics, back the middleware with a strongly
     /// consistent [`SessionStorage`] (e.g. Durable Object SQLite with
     /// `INSERT OR IGNORE`) via
-    /// [`process_auth_with_storage`](crate::process_auth_with_storage) /
-    /// [`process_payment_with_storage`](crate::process_payment_with_storage).
+    /// [`process_auth_with_storage`](crate::process_auth_with_storage). Payments
+    /// require a separate `PaymentPrefixStore`.
     pub async fn try_consume_nonce(
         &self,
         scope: &str,
@@ -470,6 +470,117 @@ mod kv_retry_tests {
             calls.get(),
             1,
             "fail closed immediately on a non-transient error"
+        );
+    }
+}
+
+/// A permanent payment-prefix binding over the session store's KV namespace.
+///
+/// G3 residual window: KV has no compare-and-swap. Concurrent requests at one
+/// edge, or requests at different edges before propagation (about 60 seconds),
+/// can both win and overwrite bindings. Use `D1PrefixStore` (feature `d1-claims`)
+/// for exact M14 enforcement. Values are `txid` or `released:txid`, never deleted
+/// or expired; the legacy `1` sentinel refuses reuse as `PrefixClaim::Unknown`.
+pub struct KvPrefixStore<'a>(pub &'a KvSessionStorage);
+
+use bsv_middleware_core::{PaymentPrefixStore, PrefixClaim, StoreError};
+
+fn judge_prefix_value(value: Option<&str>, txid: &str) -> PrefixClaim {
+    match value {
+        None => PrefixClaim::Won,
+        Some("1") => PrefixClaim::Unknown,
+        Some(value) => match value.strip_prefix("released:") {
+            Some(bound) if bound == txid => PrefixClaim::Won,
+            Some(_) => PrefixClaim::OtherTransaction,
+            None if value == txid => PrefixClaim::SameTransaction,
+            None => PrefixClaim::OtherTransaction,
+        },
+    }
+}
+
+impl PaymentPrefixStore for KvPrefixStore<'_> {
+    async fn claim_prefix(
+        &self,
+        prefix: &str,
+        txid: &str,
+        _agent: &str,
+    ) -> std::result::Result<PrefixClaim, StoreError> {
+        #[allow(deprecated)]
+        let key = self
+            .0
+            .nonce_key(bsv_middleware_core::PAYMENT_NONCE_SCOPE, prefix);
+        let value = self
+            .0
+            .kv
+            .get(&key)
+            .text()
+            .await
+            .map_err(|e| StoreError::new(e.to_string()))?;
+        let claim = judge_prefix_value(value.as_deref(), txid);
+        if claim == PrefixClaim::Won {
+            self.0
+                .kv
+                .put(&key, txid)
+                .map_err(|e| StoreError::new(e.to_string()))?
+                .execute()
+                .await
+                .map_err(|e| StoreError::new(e.to_string()))?;
+        }
+        Ok(claim)
+    }
+
+    async fn release_prefix(
+        &self,
+        prefix: &str,
+        txid: &str,
+    ) -> std::result::Result<(), StoreError> {
+        #[allow(deprecated)]
+        let key = self
+            .0
+            .nonce_key(bsv_middleware_core::PAYMENT_NONCE_SCOPE, prefix);
+        let value = self
+            .0
+            .kv
+            .get(&key)
+            .text()
+            .await
+            .map_err(|e| StoreError::new(e.to_string()))?;
+        if value.as_deref() == Some(txid) {
+            self.0
+                .kv
+                .put(&key, format!("released:{txid}"))
+                .map_err(|e| StoreError::new(e.to_string()))?
+                .execute()
+                .await
+                .map_err(|e| StoreError::new(e.to_string()))?;
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod prefix_tests {
+    use super::*;
+
+    #[test]
+    fn the_kv_prefix_encoding() {
+        assert_eq!(judge_prefix_value(None, "a"), PrefixClaim::Won);
+        assert_eq!(judge_prefix_value(Some("1"), "a"), PrefixClaim::Unknown);
+        assert_eq!(
+            judge_prefix_value(Some("a"), "a"),
+            PrefixClaim::SameTransaction
+        );
+        assert_eq!(
+            judge_prefix_value(Some("a"), "b"),
+            PrefixClaim::OtherTransaction
+        );
+        assert_eq!(
+            judge_prefix_value(Some("released:a"), "a"),
+            PrefixClaim::Won
+        );
+        assert_eq!(
+            judge_prefix_value(Some("released:a"), "b"),
+            PrefixClaim::OtherTransaction
         );
     }
 }

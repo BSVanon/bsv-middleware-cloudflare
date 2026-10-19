@@ -35,7 +35,7 @@ use bsv_middleware_cloudflare::{
         sign_json_response, AuthMiddlewareOptions, AuthResult, AuthSession,
         PaymentMiddlewareOptions, PaymentResult,
     },
-    storage::KvSessionStorage,
+    storage::{KvPrefixStore, KvSessionStorage},
     types::AuthContext,
 };
 use serde_json::json;
@@ -126,13 +126,13 @@ async fn handle_paid(
     let payment_options =
         PaymentMiddlewareOptions::new(server_key.to_string(), |_req: &Request| 100u64);
 
-    // The session storage doubles as the single-use nonce store: each
-    // payment derivation prefix is consumed on first use, so a replayed
-    // X-BSV-Payment header is rejected instead of internalized again.
+    // KV retains the G3 race/propagation window. Production hosts that need
+    // exact M14 enforcement should enable d1-claims and pass D1PrefixStore.
     let session_storage = KvSessionStorage::new(env.kv("AUTH_SESSIONS")?, "auth", 3600);
 
+    let payment_prefixes = KvPrefixStore(&session_storage);
     let payment_ctx =
-        match process_payment_with_storage(&req, auth, &payment_options, &session_storage)
+        match process_payment_with_storage(&req, auth, &payment_options, &payment_prefixes)
             .await
             .map_err(|e| Error::from(e.to_string()))?
         {

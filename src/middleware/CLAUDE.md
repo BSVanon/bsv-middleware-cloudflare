@@ -15,7 +15,7 @@ Both middleware functions are designed to be called sequentially in request hand
 
 ```rust
 pub use auth::{process_auth, sign_json_response, sign_response, AuthMiddlewareOptions, AuthResult, AuthSession};
-pub use payment::{process_payment, PaymentMiddlewareOptions, PaymentResult, payment_headers};
+pub use payment::{process_payment_with_storage, PaymentMiddlewareOptions, PaymentResult, payment_headers};
 ```
 
 ## Middleware Details
@@ -151,11 +151,11 @@ let signed = sign_json_response(&data, 200, &extra_headers, &session)?;
 
 ---
 
-### process_payment
+### process_payment_with_storage
 
 - **Purpose:** Handles BRC-29 payment flow for monetized API endpoints
 - **When:** After authentication; only for endpoints requiring payment
-- **Input:** `&Request`, `&AuthContext`, `&PaymentMiddlewareOptions<F>`
+- **Input:** `&Request`, `&AuthContext`, `&PaymentMiddlewareOptions<F>`, `&impl PaymentPrefixStore`
 - **Output:** `Result<PaymentResult>` indicating payment status
 - **Errors:** Returns 400/402/500 responses or `AuthCloudflareError` variants
 
@@ -169,12 +169,25 @@ let signed = sign_json_response(&data, 200, &extra_headers, &session)?;
    - Returns 402 with payment instructions (version, satoshis required, derivation prefix)
 5. **If payment header present:**
    - Parses `BsvPayment` JSON from header
-   - Verifies derivation prefix via stateless HMAC (`verify_nonce`) — no KV storage needed
+   - Verifies derivation prefix via stateless HMAC (`verify_nonce`) before claiming the txid
    - Decodes base64 transaction data
+   - Checks output 0 and reads the subject txid, then claims through `PaymentPrefixStore`
+   - M14: another txid gets 400 `ERR_INVALID_DERIVATION_PREFIX`, no fresh challenge, no internalize or refund
+   - Held/served prefixes refuse their own txid too; release after an internalize error allows only that txid to retry
+   - `accepted: false` keeps the binding held; all bindings persist without expiry
    - Creates a `WorkerStorageClient` (BRC-103/104 client to remote storage server)
    - Initializes connection: `make_available()` → `find_or_insert_user()`
    - Calls `internalize_action()` on the storage client to process payment
    - Returns `PaymentResult::Verified` on success, `PaymentResult::Failed` on error
+
+`D1PrefixStore` is exact. `KvPrefixStore` retains G3: same-edge races and about
+60 seconds of cross-edge propagation can admit competing transactions. DO auth
+storage is separate. Run `PAYMENT_CLAIMS_MIGRATION` once on existing tables before
+0.7.0; legacy rows remain closed. The stateless `process_payment` was removed.
+Fleet `payment_prefix_gate` takes explicit `FaultPosture`: Closed gives retryable
+503 `ERR_PAYMENT_LOCK_UNAVAILABLE`, quote kept; Open returns fault detail for the
+door to log. Other txid gives 400 `ERR_PAYMENT_INVALID`, same/unknown 409
+`ERR_PAYMENT_REPLAYED`. The host signs responses; bodies never include a txid.
 
 **Configuration (`PaymentMiddlewareOptions<F>`):**
 
@@ -228,7 +241,7 @@ Request → 1. CORS Preflight Check (OPTIONS → handle_cors_preflight)
              /.well-known/auth? → Handshake response
              Has auth headers?  → Verify signature, capture body bytes
              No headers?        → Allow (if configured) or 401
-        → 3. process_payment() (if endpoint paid)
+        → 3. process_payment_with_storage() (if endpoint paid)
              Price = 0?    → Free
              No payment?   → 402 Required
              Has payment?  → Verify transaction
@@ -273,7 +286,7 @@ Store this in a Cloudflare Worker secret and pass to both middleware options.
 
 ```rust
 use bsv_middleware_cloudflare::middleware::{
-    process_auth, sign_json_response, sign_response, process_payment,
+    process_auth, sign_json_response, sign_response, process_payment_with_storage,
     AuthMiddlewareOptions, PaymentMiddlewareOptions,
     AuthResult, PaymentResult,
 };
@@ -308,7 +321,9 @@ pub async fn main(req: Request, env: Env, _ctx: Context) -> worker::Result<Respo
         },
     );
 
-    let payment_context = match process_payment(&req, &auth_context, &payment_options).await? {
+    let session_storage = bsv_middleware_cloudflare::KvSessionStorage::new(env.kv("AUTH_SESSIONS")?, "auth", 3600);
+    let prefixes = bsv_middleware_cloudflare::KvPrefixStore(&session_storage);
+    let payment_context = match process_payment_with_storage(&req, &auth_context, &payment_options, &prefixes).await? {
         PaymentResult::Free => None,
         PaymentResult::Required(resp) => return Ok(resp),
         PaymentResult::Verified(ctx) => Some(ctx),
