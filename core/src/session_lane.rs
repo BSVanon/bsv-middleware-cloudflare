@@ -26,11 +26,8 @@
 //! PRODUCED here (`emit_session_lane_vectors`) and pinned byte-for-byte by the
 //! client (the relay adopter's copy of `session_lane.vectors.json`): the
 //! artifact is shared, never the convention.
-use hmac::{Hmac, Mac};
+use bsv_sdk::primitives::hash::{sha256, sha256_hmac};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
-
-type HmacSha256 = Hmac<Sha256>;
 
 /// The default domain separator inside `K`'s derivation. A server may pass its
 /// own label (the relay keeps `low-relay-session/v1`); the vectors say which.
@@ -179,34 +176,29 @@ pub fn derive_key(
     client_nonce: &str,
     server_nonce: &str,
 ) -> [u8; 32] {
-    let mut mac = HmacSha256::new_from_slice(salt).expect("HMAC accepts any key length");
-    mac.update(label);
-    mac.update(id);
-    mac.update(client_nonce.as_bytes());
-    mac.update(server_nonce.as_bytes());
-    let out = mac.finalize().into_bytes();
-    let mut k = [0u8; 32];
-    k.copy_from_slice(&out);
-    k
+    let mut data =
+        Vec::with_capacity(label.len() + id.len() + client_nonce.len() + server_nonce.len());
+    data.extend_from_slice(label);
+    data.extend_from_slice(id);
+    data.extend_from_slice(client_nonce.as_bytes());
+    data.extend_from_slice(server_nonce.as_bytes());
+    sha256_hmac(salt, &data)
 }
 
 /// `m = HMAC-SHA256(K, n as 8 bytes little-endian ‖ e ‖ 0x00 ‖ sha256(d))`.
 pub fn frame_mac(key: &[u8; 32], n: u64, e: &str, d: &str) -> [u8; 32] {
-    let digest: [u8; 32] = Sha256::digest(d.as_bytes()).into();
+    let digest: [u8; 32] = sha256(d.as_bytes());
     frame_mac_over_digest(key, n, e, &digest)
 }
 
 /// `frame_mac` with the body's sha256 already in hand (a request body read as bytes).
 pub fn frame_mac_over_digest(key: &[u8; 32], n: u64, e: &str, digest: &[u8; 32]) -> [u8; 32] {
-    let mut mac = HmacSha256::new_from_slice(key).expect("HMAC accepts any key length");
-    mac.update(&n.to_le_bytes());
-    mac.update(e.as_bytes());
-    mac.update(&[0u8]);
-    mac.update(digest);
-    let out = mac.finalize().into_bytes();
-    let mut m = [0u8; 32];
-    m.copy_from_slice(&out);
-    m
+    let mut data = Vec::with_capacity(8 + e.len() + 1 + digest.len());
+    data.extend_from_slice(&n.to_le_bytes());
+    data.extend_from_slice(e.as_bytes());
+    data.push(0);
+    data.extend_from_slice(digest);
+    sha256_hmac(key, &data)
 }
 
 /// The HTTP "event": `"METHOD path?query"` — the method upper-cased, the path
@@ -225,7 +217,7 @@ pub fn path_and_query(path: &str, query: Option<&str>) -> String {
 
 /// sha256 of a body's bytes.
 pub fn body_digest(body: &[u8]) -> [u8; 32] {
-    Sha256::digest(body).into()
+    sha256(body)
 }
 
 /// The seal on an answer: `HMAC(K, h ‖ "response" ‖ 0x00 ‖ sha256(body))`, hex.
@@ -1012,7 +1004,7 @@ mod tests {
 
     #[test]
     fn session_lane_vectors_are_the_pinned_bytes_and_the_real_producer_re_derives_them() {
-        let digest_hex = hex::encode(Sha256::digest(SESSION_LANE_VECTORS.as_bytes()));
+        let digest_hex = hex::encode(sha256(SESSION_LANE_VECTORS.as_bytes()));
         assert_eq!(
             digest_hex, SESSION_LANE_VECTORS_SHA256,
             "session_lane.vectors.json changed. It is a CROSS-REPO agreement: copy it to \
@@ -1304,7 +1296,7 @@ pub fn prepare_attest(
     {
         return Err(AttestRefusal::WrongOrigin);
     }
-    let digest = Sha256::digest(outer.attest_json.as_bytes());
+    let digest = sha256(outer.attest_json.as_bytes());
     Ok((
         AttestHubBody {
             id: outer.lane.id.to_ascii_lowercase(),
@@ -1346,7 +1338,7 @@ mod attest_tests {
         let outer: AttestBody = serde_json::from_str(&body("https://door.test")).unwrap();
         assert_eq!(
             hub.body_sha256,
-            hex::encode(Sha256::digest(outer.attest_json.as_bytes())),
+            hex::encode(sha256(outer.attest_json.as_bytes())),
             "the digest is over the transmitted text, never a re-serialisation"
         );
         assert_eq!(inner.ask, "a1b2c3d4e5f60718");

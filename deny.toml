@@ -14,6 +14,22 @@ confidence-threshold = 0.8
 multiple-versions = "warn"
 wildcards = "deny"
 highlight = "all"
+deny = [
+    # bsv-rs 0.7.0: bsv-rs, k256, p256.
+    { name = "sha2", wrappers = ["bsv-rs", "k256", "p256"], reason = "Use bsv-rs hashing" },
+    # bsv-rs 0.7.0: bsv-rs.
+    { name = "ripemd", wrappers = ["bsv-rs"], reason = "Use bsv-rs hashing" },
+    # bsv-rs 0.7.0: secp256k1 absent; retain bsv-rs alone.
+    { name = "secp256k1", wrappers = ["bsv-rs"], reason = "Use bsv-rs keys and signatures" },
+    # bsv-rs 0.7.0: bsv-rs.
+    { name = "k256", wrappers = ["bsv-rs"], reason = "Use bsv-rs keys and signatures" },
+    # bsv-rs 0.7.0: bsv-rs.
+    { name = "bs58", wrappers = ["bsv-rs"], reason = "Use bsv-rs base58check" },
+    # bsv-rs 0.7.0: bsv-rs, pbkdf2, rfc6979.
+    { name = "hmac", wrappers = ["bsv-rs", "pbkdf2", "rfc6979"], reason = "Use bsv-rs HMAC" },
+    # bsv-rs 0.7.0: bsv-rs.
+    { name = "p256", wrappers = ["bsv-rs"], reason = "Use bsv-rs keys and signatures" },
+]
 
 [sources]
 unknown-registry = "deny"

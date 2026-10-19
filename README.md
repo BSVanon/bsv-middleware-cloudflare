@@ -46,12 +46,12 @@ Error codes, HTTP statuses, and all `x-bsv-auth-*` / `x-bsv-payment-*` header na
 ## Install
 
 ```toml
-bsv-middleware-cloudflare = "0.6.2"
+bsv-middleware-cloudflare = "0.7.0"
 # Runtime-free hosts:
-bsv-middleware-core = "0.3.2"
+bsv-middleware-core = "0.4.0"
 ```
 
-Both crates require bsv-rs 0.6.0 or later in 0.6.x (caret). Work limits are optional, default `None`.
+Both crates require bsv-rs 0.7.0 or later in 0.7.x (caret). Work limits are optional, default `None`.
 A local evaluator decline names the resource and input as payer-side `Unverifiable` (`SpendRefused`),
 400 `ERR_PAYMENT_INVALID` in the adapter. A lone hashed leaf at a nonzero offset is refused by the
 SDK's `MerklePath`, with a payer-side refusal naming the offset. See [the migration](CHANGELOG.md).
@@ -320,7 +320,7 @@ after `verify_brc29_payment` succeeds and before internalizing; `release_payment
 pre-internalize failure.
 
 ```toml
-bsv-middleware-cloudflare = { version = "0.6.2", features = ["d1-claims"] }
+bsv-middleware-cloudflare = { version = "0.7.0", features = ["d1-claims"] }
 ```
 
 ## Session storage backends

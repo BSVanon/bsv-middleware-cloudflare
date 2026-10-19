@@ -2496,10 +2496,10 @@ mod tests {
     }
     #[tokio::test]
     async fn digest_authenticates_without_a_payload_copy_and_keeps_replay_protection() {
-        use sha2::{Digest, Sha256};
+        use bsv_sdk::primitives::hash::sha256;
         let store = store_with(session_for(CLIENT_KEY_HEX, true)).await;
         let mut message = general_message(CLIENT_KEY_HEX, CLIENT_KEY_HEX, "digest-nonce");
-        let digest: [u8; 32] = Sha256::digest(message.signing_data()).into();
+        let digest: [u8; 32] = sha256(&message.signing_data());
         message.payload = None;
         let wallet = test_wallet(SERVER_KEY_HEX);
         let answer =

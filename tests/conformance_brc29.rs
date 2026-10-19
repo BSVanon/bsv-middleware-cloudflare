@@ -36,13 +36,13 @@ use bsv_middleware_cloudflare::{
     verify_brc29_payment_with_header_lookup, PaymentVerifyError, UnverifiableReason,
 };
 use bsv_sdk::primitives::hash::hash160;
+use bsv_sdk::primitives::hash::sha256;
 use bsv_sdk::primitives::PrivateKey;
 use bsv_sdk::script::LockingScript;
 use bsv_sdk::transaction::{
     Beef, MerklePath, MerklePathLeaf, Transaction, TransactionInput, TransactionOutput,
 };
 use serde_json::{json, Value};
-use sha2::{Digest, Sha256};
 
 const PINNED: &str = include_str!("../conformance/brc29-payment-vectors.json");
 /// SHA-256 of the pinned copy: the owner's file (blob `8eede32d` of the
@@ -408,7 +408,7 @@ fn the_ruled_cases_are_unverifiable() {
 /// digest. A new owned file is a reviewed diff here.
 #[test]
 fn brc29_vectors_are_the_owned_bytes() {
-    let digest = hex::encode(Sha256::digest(PINNED.as_bytes()));
+    let digest = hex::encode(sha256(PINNED.as_bytes()));
     assert_eq!(
         digest, VECTORS_SHA256,
         "conformance/brc29-payment-vectors.json is not the pinned owned file. It is a CROSS-REPO \

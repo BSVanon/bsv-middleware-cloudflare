@@ -615,7 +615,7 @@ mod tests {
     }
     #[test]
     fn direct_digest_verifies_identically_and_rejects_tampering() {
-        use sha2::{Digest, Sha256};
+        use bsv_sdk::primitives::hash::sha256;
         let server = test_wallet(SERVER_KEY_HEX);
         let client = test_wallet(CLIENT_KEY_HEX);
         let binding = SessionBinding::new(
@@ -626,7 +626,7 @@ mod tests {
         let message =
             sign_general_message(&server, &binding, b"authenticated multipart body".to_vec())
                 .unwrap();
-        let digest: [u8; 32] = Sha256::digest(message.signing_data()).into();
+        let digest: [u8; 32] = sha256(&message.signing_data());
         let verify_binding = client_side("c", "s-nonce");
         assert!(verify_message_signature(&client, &message, &verify_binding).unwrap());
         let mut without_payload = message;

@@ -1,6 +1,6 @@
 [package]
 name = "bsv-middleware-cloudflare"
-version = "0.6.2"
+version = "0.7.0"
 edition = "2021"
 rust-version = "1.88"
 description = "BSV BRC-103/104 authentication and BRC-29 payment middleware for Cloudflare Workers"
@@ -18,13 +18,13 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 # The runtime-free rules this crate adapts to Workers (same repository, `core/`).
-bsv-middleware-core = { version = "0.3.2", path = "core" }
+bsv-middleware-core = { version = "0.4.0", path = "core" }
 
 # Cloudflare Workers
 worker = "0.8"
 
 # BSV SDK
-bsv-sdk = { package = "bsv-rs", version = "0.6.0", features = ["auth", "wallet", "transaction", "wasm"] }
+bsv-sdk = { package = "bsv-rs", version = "0.7.0", features = ["auth", "wallet", "transaction", "wasm"] }
 
 # Async
 futures = "0.3"
@@ -50,10 +50,6 @@ js-sys = "0.3"
 # Random
 getrandom = { version = "0.2", features = ["js"] }
 rand = "0.8"
-
-# Crypto: the session lane's MAC and the refund signer live in the core since
-# 0.4.0; sha2 stays for the Durable Object session cell's digests.
-sha2 = "0.10"
 
 [features]
 default = []

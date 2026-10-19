@@ -7,7 +7,7 @@
 
 mod tests {
     use crate::middleware::session_lane::*;
-    use sha2::{Digest, Sha256};
+    use bsv_sdk::primitives::hash::sha256;
 
     const IDENTITY: &str = "02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     const CLIENT_NONCE: &str = "Y2xpZW50LW5vbmNlLWJhc2U2NA==";
@@ -536,7 +536,7 @@ mod tests {
 
     #[test]
     fn session_lane_vectors_are_the_pinned_bytes_and_the_real_producer_re_derives_them() {
-        let digest_hex = hex::encode(Sha256::digest(SESSION_LANE_VECTORS.as_bytes()));
+        let digest_hex = hex::encode(sha256(SESSION_LANE_VECTORS.as_bytes()));
         assert_eq!(
             digest_hex, SESSION_LANE_VECTORS_SHA256,
             "session_lane.vectors.json changed. It is a CROSS-REPO agreement: copy it to \
@@ -717,7 +717,7 @@ mod tests {
 
 mod attest_tests {
     use crate::middleware::session_lane::*;
-    use sha2::{Digest, Sha256};
+    use bsv_sdk::primitives::hash::sha256;
 
     fn body(origin: &str) -> String {
         let inner = format!(
@@ -742,7 +742,7 @@ mod attest_tests {
         let outer: AttestBody = serde_json::from_str(&body("https://door.test")).unwrap();
         assert_eq!(
             hub.body_sha256,
-            hex::encode(Sha256::digest(outer.attest_json.as_bytes())),
+            hex::encode(sha256(outer.attest_json.as_bytes())),
             "the digest is over the transmitted text, never a re-serialisation"
         );
         assert_eq!(inner.ask, "a1b2c3d4e5f60718");

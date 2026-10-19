@@ -3,6 +3,23 @@
 All notable changes to `bsv-middleware-cloudflare`. Versions below 1.0 may change public API between minor versions;
 patch versions are additive unless a line below says otherwise.
 
+## Adapter 0.7.0 and core 0.4.0 - 2026-10-19
+
+- Move both SDK floors to `bsv-rs = "0.7.0"` (caret, a new compatibility line), preserving feature lists and Rust 1.88. The SDK corrects non-FORKID and Chronicle signing digests and adds `SigningContext::script_code`; this repository has no such struct literals. Default FORKID template digests are byte-identical, so the payment door is unaffected.
+- Route session-lane MACs through `primitives::hash::sha256_hmac`, session/body and authentication digests and conformance tests through `sha256`, and incremental BRC-104 framing through `Sha256`. Remove direct sha2 and hmac dependencies from both crates. The BRC-29 vectors, pinned session-lane vectors, bodySha256 values and byte goldens are unchanged.
+- Add deny rows for sha2, ripemd, secp256k1, k256, bs58, hmac and p256, allowing only bsv-rs and the immediate parents verified in this workspace.
+- (M14: added by the next lane)
+
+Migration by host:
+
+- Agents' 13 Workers: re-pin adapter 0.7.0/core 0.4.0 on bsv-rs 0.7.0; drop the two crates from any sha2/hmac wrapper list in your deny.toml.
+- LOW's tower: re-pin adapter 0.7.0/core 0.4.0 on bsv-rs 0.7.0; drop the two crates from any sha2/hmac wrapper list in your deny.toml.
+- The relay's door: re-pin adapter 0.7.0/core 0.4.0 on bsv-rs 0.7.0; drop the two crates from any sha2/hmac wrapper list in your deny.toml.
+- Zanaadu's door: re-pin adapter 0.7.0/core 0.4.0 on bsv-rs 0.7.0; drop the two crates from any sha2/hmac wrapper list in your deny.toml.
+- wallet-infra: re-pin adapter 0.7.0/core 0.4.0 on bsv-rs 0.7.0; drop the two crates from any sha2/hmac wrapper list in your deny.toml.
+- The message box (canonical and mirror): re-pin adapter 0.7.0/core 0.4.0 on bsv-rs 0.7.0; drop the two crates from any sha2/hmac wrapper list in your deny.toml.
+- The template: re-pin adapter 0.7.0/core 0.4.0 on bsv-rs 0.7.0; drop the two crates from any sha2/hmac wrapper list in your deny.toml.
+
 ## Adapter 0.6.2 and core 0.3.2 - 2026-10-13
 
 - Move both SDK floors to `bsv-rs = "0.6.0"` (caret, a new compatibility line), retaining the existing feature lists and adding no direct `block` feature or dependency.

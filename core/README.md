@@ -2,15 +2,15 @@
 
 The runtime-free rules of BSV BRC-103/104 authentication and BRC-29 payment verification: what a server must
 compute and decide, with no transport, no store, no clock and no network of its own. A host crate adapts these
-rules to its runtime; `bsv-middleware-cloudflare` 0.6.2 is the Cloudflare Workers host.
+rules to its runtime; `bsv-middleware-cloudflare` 0.7.0 is the Cloudflare Workers host.
 
 ## Install
 
 ```toml
-bsv-middleware-core = "0.3.2"
+bsv-middleware-core = "0.4.0"
 ```
 
-The SDK floor is bsv-rs 0.6.0 (caret); core 0.3.2 provides a source API and an optional work limit.
+The SDK floor is bsv-rs 0.7.0 (caret); core 0.4.0 provides a source API and an optional work limit.
 A script declining under a work or memory bound is payer-side `Unverifiable` with
 `SpendRefused`, naming the decline and input (400 `ERR_PAYMENT_INVALID` in the adapter).
 The crates set no bound themselves. The SDK's `MerklePath` refuses a lone hashed leaf
