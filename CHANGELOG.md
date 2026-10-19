@@ -18,14 +18,14 @@ patch versions are additive unless a line below says otherwise.
   ALTER TABLE payment_claims ADD COLUMN released INTEGER NOT NULL DEFAULT 0;
   ```
 
-Migration by host:
+Migration by host: deploy each Worker at 100 percent, with no gradual split. A 0.6.2 instance's `DELETE` lacks the `txid IS NULL` guard and can free a bound prefix while both versions serve.
 
 - Agents' 13 Workers: run the D1 migration once, then move the 14 payment doors to `payment_prefix_gate` with their explicit fault posture and txid-bound releases; re-pin adapter 0.7.0/core 0.4.0 on bsv-rs 0.7.0; drop the two crates from any sha2/hmac wrapper list in your deny.toml. Pass a `PaymentPrefixStore` (D1 for exact enforcement), and run the migration once if using an existing shared claims table.
-- LOW's tower: re-pin adapter 0.7.0/core 0.4.0 on bsv-rs 0.7.0; drop the two crates from any sha2/hmac wrapper list in your deny.toml. Pass a `PaymentPrefixStore` (D1 for exact enforcement), and run the migration once if using an existing shared claims table.
+- LOW's tower: re-pin adapter 0.7.0/core 0.4.0 on bsv-rs 0.7.0; drop the two crates from any sha2/hmac wrapper list in your deny.toml. In its custom payment door, claim through `D1PrefixStore` / `claim_payment_prefix` (or `payment_prefix_gate`) with the verified verdict's txid after verification and before internalize; release to that same txid only. Run the migration once if sharing an existing claims table.
 - The relay's door: re-pin adapter 0.7.0/core 0.4.0 on bsv-rs 0.7.0; drop the two crates from any sha2/hmac wrapper list in your deny.toml. Pass a `PaymentPrefixStore` (D1 for exact enforcement), and run the migration once if using an existing shared claims table.
 - Zanaadu's door: re-pin adapter 0.7.0/core 0.4.0 on bsv-rs 0.7.0; drop the two crates from any sha2/hmac wrapper list in your deny.toml. Pass a `PaymentPrefixStore` (D1 for exact enforcement), and run the migration once if using an existing shared claims table.
-- wallet-infra: re-pin adapter 0.7.0/core 0.4.0 on bsv-rs 0.7.0; drop the two crates from any sha2/hmac wrapper list in your deny.toml. Pass a `PaymentPrefixStore` (D1 for exact enforcement), and run the migration once if using an existing shared claims table.
-- The message box (canonical and mirror): re-pin adapter 0.7.0/core 0.4.0 on bsv-rs 0.7.0; drop the two crates from any sha2/hmac wrapper list in your deny.toml. Pass a `PaymentPrefixStore` (D1 for exact enforcement), and run the migration once if using an existing shared claims table.
+- wallet-infra: re-pin adapter 0.7.0/core 0.4.0 on bsv-rs 0.7.0; drop the two crates from any sha2/hmac wrapper list in your deny.toml. Pass a `PaymentPrefixStore` (D1 for exact enforcement), and run the migration once if using an existing shared claims table. For any custom payment door, claim through `D1PrefixStore` / `claim_payment_prefix` (or `payment_prefix_gate`) with the verified verdict's txid after verification and before internalize; release to that same txid only.
+- The message box (canonical and mirror): re-pin adapter 0.7.0/core 0.4.0 on bsv-rs 0.7.0; drop the two crates from any sha2/hmac wrapper list in your deny.toml. In its own `payments::process_payment`, claim through `D1PrefixStore` / `claim_payment_prefix` (or `payment_prefix_gate`) with the verified verdict's txid after verification and before internalize; release to that same txid only. Run the migration once if sharing an existing claims table.
 - The template: re-pin adapter 0.7.0/core 0.4.0 on bsv-rs 0.7.0; drop the two crates from any sha2/hmac wrapper list in your deny.toml. Pass a `PaymentPrefixStore` (D1 for exact enforcement), and run the migration once if using an existing shared claims table.
 
 ## Adapter 0.6.2 and core 0.3.2 - 2026-10-13

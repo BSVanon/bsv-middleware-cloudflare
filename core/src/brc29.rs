@@ -668,6 +668,13 @@ mod tests {
         let mut beef = bsv_sdk::transaction::Beef::from_binary(&plain).unwrap();
         let atomic = beef.to_binary_atomic(&first.id()).unwrap();
         assert_eq!(payment_subject_txid(&atomic).unwrap(), first.id());
+        for bytes in [&plain, &atomic] {
+            let txid = payment_subject_txid(bytes).unwrap();
+            assert_eq!(txid.len(), 64);
+            assert!(txid
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)));
+        }
         assert!(matches!(
             payment_subject_txid(&[]),
             Err(UnverifiableReason::MalformedTransaction(_))

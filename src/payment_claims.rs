@@ -132,14 +132,28 @@ fn classify_prefix(
     }
 }
 
+fn validate_txid(txid: &str) -> Result<(), String> {
+    if txid.len() == 64
+        && txid
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    {
+        Ok(())
+    } else {
+        Err("payment txid must be 64 lowercase hex characters".into())
+    }
+}
+
 /// Claim a prefix with one atomic upsert and its read in the same D1 batch.
 /// A missing change count never grants a win; a missing row is a fault.
+/// A txid that is not 64 lowercase hex characters faults before any store call.
 pub async fn claim_payment_prefix(
     db: &D1Database,
     prefix: &str,
     txid: &str,
     agent: &str,
 ) -> Result<PrefixClaim, String> {
+    validate_txid(txid)?;
     let claim = db
         .prepare(PREFIX_CLAIM_SQL)
         .bind(&[prefix.into(), agent.into(), txid.into()])
@@ -219,7 +233,7 @@ pub enum PrefixGate {
 fn prefix_gate_answer(claim: Result<PrefixClaim, String>, posture: FaultPosture) -> PrefixGate {
     let (status, code, description, retryable) = match claim {
         Ok(PrefixClaim::Won) => return PrefixGate::Proceed,
-        Ok(PrefixClaim::SameTransaction | PrefixClaim::Unknown) => (409, "ERR_PAYMENT_REPLAYED", "This payment derivation prefix was already claimed.", false),
+        Ok(PrefixClaim::SameTransaction | PrefixClaim::Unknown) => (409, "ERR_PAYMENT_REPLAYED", "This payment is already being processed or was already used. Retry without payment to get a fresh quote.", false),
         Ok(PrefixClaim::OtherTransaction) => (400, "ERR_PAYMENT_INVALID", "Payment rejected: this derivation prefix was already used by another transaction (BRC-105: each prefix pays once). Nothing was internalized; get a fresh quote.", false),
         Err(detail) if posture == FaultPosture::Open => return PrefixGate::Fault { detail },
         Err(_) => (503, "ERR_PAYMENT_LOCK_UNAVAILABLE", "The payment claim ledger is unavailable. Nothing was internalized; the quote is still valid. Retry the same payment.", true),
@@ -233,7 +247,7 @@ fn prefix_gate_answer(claim: Result<PrefixClaim, String>, posture: FaultPosture)
 }
 
 /// Claim through `CLAIMS` before any storage handshake, internalize or handler.
-/// Missing bindings and D1 faults follow the door's explicit `posture`.
+/// Invalid txid shapes, missing bindings and D1 faults follow the door's explicit `posture`.
 pub async fn payment_prefix_gate(
     env: &Env,
     prefix: &str,
@@ -241,6 +255,9 @@ pub async fn payment_prefix_gate(
     agent: &str,
     posture: FaultPosture,
 ) -> PrefixGate {
+    if let Err(detail) = validate_txid(txid) {
+        return prefix_gate_answer(Err(detail), posture);
+    }
     let result = match env.d1("CLAIMS") {
         Ok(db) => claim_payment_prefix(&db, prefix, txid, agent).await,
         Err(e) => Err(e.to_string()),
@@ -264,6 +281,40 @@ pub async fn release_payment_prefix(env: &Env, prefix: &str, txid: &str) {
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn malformed_txids_fault_before_any_store_call() {
+        use wasm_bindgen::JsCast;
+
+        // Null handles panic on native if either entry point reaches a JS store call.
+        let db = D1Database::unchecked_from_js(JsValue::NULL);
+        let env = Env::unchecked_from_js(JsValue::NULL);
+        for txid in [
+            "".to_string(),
+            "a".repeat(63),
+            "a".repeat(65),
+            "A".repeat(64),
+            "g".repeat(64),
+        ] {
+            let detail = claim_payment_prefix(&db, "prefix", &txid, "agent")
+                .await
+                .unwrap_err();
+            assert_eq!(detail, "payment txid must be 64 lowercase hex characters");
+            assert_eq!(
+                payment_prefix_gate(&env, "prefix", &txid, "agent", FaultPosture::Open).await,
+                PrefixGate::Fault { detail }
+            );
+            let PrefixGate::Refuse { status, body } =
+                payment_prefix_gate(&env, "prefix", &txid, "agent", FaultPosture::Closed).await
+            else {
+                panic!("expected closed-posture refusal");
+            };
+            assert_eq!(status, 503);
+            assert_eq!(body["code"], "ERR_PAYMENT_LOCK_UNAVAILABLE");
+            assert_eq!(body["retryable"], true);
+        }
+        assert!(validate_txid(&"0123456789abcdef".repeat(4)).is_ok());
+    }
+
     #[test]
     fn test_claim_is_won_only_by_an_inserted_row() {
         assert!(claim_won(Some(1)));
@@ -282,9 +333,12 @@ mod tests {
     fn the_claims_sql_on_sqlite() {
         use rusqlite::{Connection, OptionalExtension};
         fn claim(db: &mut Connection, prefix: &str, txid: &str) -> PrefixClaim {
+            claim_as(db, prefix, txid, "agent")
+        }
+        fn claim_as(db: &mut Connection, prefix: &str, txid: &str, agent: &str) -> PrefixClaim {
             let batch = db.transaction().unwrap();
             let changes = batch
-                .execute(PREFIX_CLAIM_SQL, [prefix, "agent", txid])
+                .execute(PREFIX_CLAIM_SQL, [prefix, agent, txid])
                 .unwrap();
             let row = batch
                 .query_row(PREFIX_READ_SQL, [prefix], |row| {
@@ -331,6 +385,55 @@ mod tests {
         );
         assert_eq!(claim(&mut migrated, "legacy", "b"), PrefixClaim::Unknown);
         exercise(&mut migrated);
+        // Fold: a re-take keeps the first claim's agent and created_at.
+        migrated
+            .execute(
+                "UPDATE payment_claims SET created_at = 7 WHERE nonce = 'p'",
+                [],
+            )
+            .unwrap();
+        assert_eq!(migrated.execute(PREFIX_RELEASE_SQL, ["p", "a"]).unwrap(), 1);
+        assert_eq!(
+            claim_as(&mut migrated, "p", "a", "new-agent"),
+            PrefixClaim::Won
+        );
+        let (agent, created): (String, i64) = migrated
+            .query_row(
+                "SELECT agent, created_at FROM payment_claims WHERE nonce = 'p'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!((agent.as_str(), created), ("agent", 7));
+        // Fold: the migration is not idempotent; a second run fails loudly.
+        assert!(migrated.execute_batch(PAYMENT_CLAIMS_MIGRATION[0]).is_err());
+        // Fold: a legacy (txid NULL) prefix row stays deletable by RELEASE_SQL,
+        // the transition path of a door still on claim_payment_nonce.
+        assert_eq!(migrated.execute(RELEASE_SQL, ["legacy"]).unwrap(), 1);
+        // Fold: two connections on one file, the second re-take loses.
+        let path = std::env::temp_dir().join(format!("m14-{}.db", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let mut one = Connection::open(&path).unwrap();
+        one.execute_batch(PAYMENT_CLAIMS_SCHEMA).unwrap();
+        assert_eq!(claim(&mut one, "r", "a"), PrefixClaim::Won);
+        one.execute(PREFIX_RELEASE_SQL, ["r", "a"]).unwrap();
+        let mut two = Connection::open(&path).unwrap();
+        let t1 = one
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .unwrap();
+        assert_eq!(
+            t1.execute(PREFIX_CLAIM_SQL, ["r", "agent", "a"]).unwrap(),
+            1
+        );
+        two.busy_timeout(std::time::Duration::from_millis(50))
+            .unwrap();
+        assert!(
+            two.execute(PREFIX_CLAIM_SQL, ["r", "agent", "a"]).is_err(),
+            "writer locked out"
+        );
+        t1.commit().unwrap();
+        assert_eq!(claim(&mut two, "r", "a"), PrefixClaim::SameTransaction);
+        let _ = std::fs::remove_file(&path);
         assert_eq!(
             classify_prefix(
                 None,
@@ -381,6 +484,9 @@ mod tests {
             assert!(!body.to_string().contains("txid"));
             assert!(!body.to_string().contains("private"));
             assert!(body.get("transaction").is_none());
+            if status == 409 {
+                assert_eq!(body["description"], "This payment is already being processed or was already used. Retry without payment to get a fresh quote.");
+            }
             if status == 503 {
                 assert_eq!(body["retryable"], true);
                 assert!(body["description"]

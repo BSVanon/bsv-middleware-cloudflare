@@ -14,6 +14,8 @@ confidence-threshold = 0.8
 multiple-versions = "warn"
 wildcards = "deny"
 highlight = "all"
+# Wrappers are immediate parents, not an exemption for bsv-rs's whole subtree.
+# Re-read and re-stamp this list when the line's bsv-rs pin moves.
 deny = [
     # bsv-rs 0.7.0: bsv-rs, k256, p256.
     { name = "sha2", wrappers = ["bsv-rs", "k256", "p256"], reason = "Use bsv-rs hashing" },

@@ -479,8 +479,9 @@ mod kv_retry_tests {
 /// G3 residual window: KV has no compare-and-swap. Concurrent requests at one
 /// edge, or requests at different edges before propagation (about 60 seconds),
 /// can both win and overwrite bindings. Use `D1PrefixStore` (feature `d1-claims`)
-/// for exact M14 enforcement. Values are `txid` or `released:txid`, never deleted
-/// or expired; the legacy `1` sentinel refuses reuse as `PrefixClaim::Unknown`.
+/// for exact M14 enforcement. After a release, edge-cached reads can still
+/// refuse the same txid as a replay for about 60 seconds. Values are `txid` or
+/// `released:txid`, never deleted or expired; the legacy `1` sentinel refuses reuse as `PrefixClaim::Unknown`.
 pub struct KvPrefixStore<'a>(pub &'a KvSessionStorage);
 
 use bsv_middleware_core::{PaymentPrefixStore, PrefixClaim, StoreError};
@@ -509,22 +510,29 @@ impl PaymentPrefixStore for KvPrefixStore<'_> {
         let key = self
             .0
             .nonce_key(bsv_middleware_core::PAYMENT_NONCE_SCOPE, prefix);
-        let value = self
-            .0
-            .kv
-            .get(&key)
-            .text()
-            .await
-            .map_err(|e| StoreError::new(e.to_string()))?;
-        let claim = judge_prefix_value(value.as_deref(), txid);
-        if claim == PrefixClaim::Won {
+        let value = with_kv_read_retry(|| async {
             self.0
                 .kv
-                .put(&key, txid)
-                .map_err(|e| StoreError::new(e.to_string()))?
-                .execute()
+                .get(&key)
+                .text()
                 .await
-                .map_err(|e| StoreError::new(e.to_string()))?;
+                .map_err(|e| AuthCloudflareError::KvError(e.to_string()))
+        })
+        .await
+        .map_err(|e| StoreError::new(e.to_string()))?;
+        let claim = judge_prefix_value(value.as_deref(), txid);
+        if claim == PrefixClaim::Won {
+            with_kv_read_retry(|| async {
+                self.0
+                    .kv
+                    .put(&key, txid)
+                    .map_err(|e| AuthCloudflareError::KvError(e.to_string()))?
+                    .execute()
+                    .await
+                    .map_err(|e| AuthCloudflareError::KvError(e.to_string()))
+            })
+            .await
+            .map_err(|e| StoreError::new(e.to_string()))?;
         }
         Ok(claim)
     }
@@ -538,21 +546,28 @@ impl PaymentPrefixStore for KvPrefixStore<'_> {
         let key = self
             .0
             .nonce_key(bsv_middleware_core::PAYMENT_NONCE_SCOPE, prefix);
-        let value = self
-            .0
-            .kv
-            .get(&key)
-            .text()
-            .await
-            .map_err(|e| StoreError::new(e.to_string()))?;
-        if value.as_deref() == Some(txid) {
+        let value = with_kv_read_retry(|| async {
             self.0
                 .kv
-                .put(&key, format!("released:{txid}"))
-                .map_err(|e| StoreError::new(e.to_string()))?
-                .execute()
+                .get(&key)
+                .text()
                 .await
-                .map_err(|e| StoreError::new(e.to_string()))?;
+                .map_err(|e| AuthCloudflareError::KvError(e.to_string()))
+        })
+        .await
+        .map_err(|e| StoreError::new(e.to_string()))?;
+        if value.as_deref() == Some(txid) {
+            with_kv_read_retry(|| async {
+                self.0
+                    .kv
+                    .put(&key, format!("released:{txid}"))
+                    .map_err(|e| AuthCloudflareError::KvError(e.to_string()))?
+                    .execute()
+                    .await
+                    .map_err(|e| AuthCloudflareError::KvError(e.to_string()))
+            })
+            .await
+            .map_err(|e| StoreError::new(e.to_string()))?;
         }
         Ok(())
     }

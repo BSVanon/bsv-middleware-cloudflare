@@ -459,7 +459,7 @@ wrangler secret put SERVER_PRIVATE_KEY
 ## Dependencies
 
 - `bsv_middleware_core` - the rules (`../core/`): the six-word verdict, the header-service and store traits, BRC-29 derivation and verification, BRC-103/104 message build and verify, the session lane, the refund signer
-- `bsv_sdk` (bsv-rs 0.4) - BSV primitives, wallet (`ProtoWallet`, `WalletInterface`), auth protocol, nonce utils; the streaming BEEF reader the core verifies payments through
+- `bsv_sdk` (bsv-rs 0.7) - BSV primitives, wallet (`ProtoWallet`, `WalletInterface`), auth protocol, nonce utils; the streaming BEEF reader the core verifies payments through
 - `worker` - Cloudflare Workers runtime (Request, Response, KV, Headers; `d1` only under the `d1-claims` feature)
 - `serde` / `serde_json` - Serialization
 - `thiserror` - Error derive macros
