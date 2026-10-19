@@ -126,15 +126,22 @@ pub trait HeaderService {
 answer. A host implements it over whatever it has: an HTTP header service, a service binding, a cached header store,
 a fixture (`LookupFn` wraps a closure).
 
-**The stores are traits.** `PaymentNonceStore` (scoped single-use values: a BRC-104 per-request nonce under its
-session, a BRC-29 derivation prefix under `PAYMENT_NONCE_SCOPE`) and `ClaimStore` (an atomic claim by key, for a
-host's own payment flow or a refund idempotency key). Both fail closed by contract: a storage fault is an error,
-never a fresh claim. `MemoryStore` implements both for tests and single-process hosts.
+**The stores are traits.** `PaymentPrefixStore` binds a derivation prefix to its first subject txid
+permanently (M14, BRC-105). `claim_prefix` returns `PrefixClaim::{Won, SameTransaction,
+OtherTransaction, Unknown}`. Only `Won` proceeds to the wallet. A released record can be re-taken
+only by its own txid; held and served records refuse even that txid. `release_prefix` retains the
+binding forever. The adapter provides exact D1 and eventually consistent KV implementations.
+
+`PaymentNonceStore` holds BRC-104 request nonces under their session; `ClaimStore` holds idempotency
+keys, such as refund-once keys. Neither is for payment prefixes. All fail closed by contract:
+a storage fault is an error, never a fresh claim. `MemoryStore` implements all three for tests
+and single-process hosts. `PAYMENT_NONCE_SCOPE` is deprecated and retained as a legacy KV namespace.
 
 ## What else is here
 
 - `brc29`: BRC-29 derivation (`expected_locking_script`, the sender's side, the derivation-prefix HMAC nonce)
-  and the pays-us-correctly check (`verify_payment_output`).
+  and the pays-us-correctly check (`verify_payment_output`). `payment_subject_txid` uses the same
+  subject selection: the Atomic BEEF's named transaction, otherwise the last transaction.
 - `spv`: the per-root decision (`decide_root`, pinned by a table) and the loop over a proof's roots
   (`check_roots`: the first mismatch decides, the lowest unanswered height is the `HeaderLookupFailed` height).
 - `brc104`: BRC-104 header names, the signed request and response payloads, the header pairs a message is sent as.
