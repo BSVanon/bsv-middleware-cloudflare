@@ -198,6 +198,11 @@ jobs:
         # Cargo stages the unpublished core in a temporary local registry for
         # the adapter's package verification. Nothing is uploaded by dry-run.
         run: cargo publish --dry-run --workspace
+        # Cargo's temporary registry reuses the package name and version. A
+        # restored Cargo cache can contain an older staged core at that version.
+        # Isolate this verification so it reads the core packaged by this run.
+        env:
+          CARGO_HOME: ${{ runner.temp }}/cargo-workspace-publish
 
   deny:
     runs-on: ubuntu-latest
