@@ -1228,7 +1228,7 @@ pub fn add_lane_cors_headers(response: Response) -> Response {
         let _ = headers.set(
             "Access-Control-Expose-Headers",
             &format!(
-                "{}, {}, {}, {}",
+                "{}, {}, {}, {}, Retry-After",
                 expose,
                 lane::SESSION_COUNTER_HEADER,
                 lane::SESSION_MAC_HEADER,
@@ -1419,7 +1419,7 @@ pub fn add_cors_headers(response: Response) -> Response {
     let _ = headers.set(
         "Access-Control-Expose-Headers",
         &format!(
-            "{}, {}, {}, {}, {}, {}, {}, x-bsv-payment-satoshis-paid, x-bsv-payment-version, x-bsv-payment-satoshis-required, x-bsv-payment-derivation-prefix, x-bsv-payment-txid, {}",
+            "{}, {}, {}, {}, {}, {}, {}, x-bsv-payment-satoshis-paid, x-bsv-payment-version, x-bsv-payment-satoshis-required, x-bsv-payment-derivation-prefix, x-bsv-payment-txid, {}, Retry-After",
             auth_headers::VERSION,
             auth_headers::IDENTITY_KEY,
             auth_headers::NONCE,
@@ -2146,6 +2146,10 @@ mod tests {
             assert!(
                 body[expose..].contains("lane::LANE_OFFER_HEADER"),
                 "{emitter} exposes the lane offer header"
+            );
+            assert!(
+                body[expose..].contains("Retry-After"),
+                "{emitter} exposes the payment retry delay"
             );
         }
     }
