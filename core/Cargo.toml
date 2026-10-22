@@ -1,6 +1,6 @@
 [package]
 name = "bsv-middleware-core"
-version = "0.4.0"
+version = "0.4.1"
 edition = "2021"
 rust-version = "1.88"
 description = "Runtime-free BSV BRC-103/104 authentication and BRC-29 payment verification: the pure rules behind bsv-middleware-cloudflare"
@@ -16,7 +16,7 @@ crate-type = ["rlib"]
 [dependencies]
 # BSV SDK: keys, BRC-42 derivation, BRC-103 message types, BEEF and merkle paths.
 # No `wasm` feature here: the host crate turns it on for a wasm32 build.
-bsv-sdk = { package = "bsv-rs", version = "0.7.0", features = ["auth", "wallet", "transaction"] }
+bsv-sdk = { package = "bsv-rs", version = "0.8", features = ["auth", "wallet", "transaction"] }
 
 async-trait = "0.1"
 

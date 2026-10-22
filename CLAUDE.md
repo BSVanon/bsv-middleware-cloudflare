@@ -7,7 +7,7 @@ adapted for the Workers runtime (KV for state, async everywhere, explicit respon
 **Detailed module-level docs are in `src/CLAUDE.md`.** This file is a quick orientation.
 
 Since 0.4.0 this is a two-crate workspace: `core/` is `bsv-middleware-core` (the runtime-free rules: no worker,
-no fetch, no KV/DO/D1, no clock; 0.4.0), and the root crate is the Workers adapter over it (0.7.1). M14 removes deprecated `process_payment` and requires a `PaymentPrefixStore` for payment entry points; other retained public items keep their paths. `src/api_surface_tests.rs` pins the fleet's call shapes.
+no fetch, no KV/DO/D1, no clock; 0.4.1), and the root crate is the Workers adapter over it (0.7.2). M14 removes deprecated `process_payment` and requires a `PaymentPrefixStore` for payment entry points; other retained public items keep their paths. `src/api_surface_tests.rs` pins the fleet's call shapes.
 Since 0.5.0 the payment is read through bsv-rs 0.4's streaming reader with the scripts run, and nothing is refused
 for its size or its counts (the posture of 2026-10-09, "a BEEF of any size"): no limit, no 413, no `BeefLimits`.
 Since 0.5.1 (core 0.2.1) the floor is bsv-rs 0.4.1: a raw transaction with no input is the reader's invalid bytes
@@ -15,7 +15,7 @@ Since 0.5.1 (core 0.2.1) the floor is bsv-rs 0.4.1: a raw transaction with no in
 bsv-middleware-rs 0.4.1), and the core's own `NoProof` for that shape stays beneath the reader as defense in depth.
 No behavior change for a host: payer-side, 400 either way; the 22 vectors are unchanged.
 
-Current release: adapter 0.7.1 / core 0.4.0, both on `bsv-rs = "0.7.0"` (caret), Rust 1.88.
+Current release: adapter 0.7.2 / core 0.4.1, both on `bsv-rs = "0.8"` (caret; 0.8.0 adds `Error::WalletBusy` and marks `Error` `#[non_exhaustive]`), Rust 1.88.
 Hashing uses bsv-rs `primitives::hash::{sha256, sha256_hmac, Sha256}`; no direct sha2 or hmac.
 
 ## Build
@@ -212,7 +212,7 @@ Payment: `x-bsv-payment`, `x-bsv-payment-version`, `x-bsv-payment-satoshis-requi
 |---|---|
 | Express auth middleware (reference) | `~/bsv/auth-express-middleware/` |
 | Express payment middleware (reference) | `~/bsv/payment-express-middleware/` |
-| BSV SDK (used for auth, wallet, transaction) | `~/bsv/bsv-rs/` (crates.io: `bsv-rs = "0.7.0"`) |
+| BSV SDK (used for auth, wallet, transaction) | `~/bsv/bsv-rs/` (crates.io: `bsv-rs = "0.8"`) |
 | Consumer example | `~/bsv/rust-message-box/` |
 | Agent consumers | `~/bsv/agents/{banana-agent,claude-agent,...}` |
 

@@ -46,9 +46,9 @@ Error codes, HTTP statuses, and all `x-bsv-auth-*` / `x-bsv-payment-*` header na
 ## Install
 
 ```toml
-bsv-middleware-cloudflare = "0.7.1"
+bsv-middleware-cloudflare = "0.7.2"
 # Runtime-free hosts:
-bsv-middleware-core = "0.4.0"
+bsv-middleware-core = "0.4.1"
 ```
 
 Both crates require bsv-rs 0.7.0 or later in 0.7.x (caret). Work limits are optional, default `None`.
@@ -347,7 +347,7 @@ across edges (about 60 seconds) can admit competing transactions. A DO auth
 backend does not make this KV payment backend exact; select D1 separately.
 
 ```toml
-bsv-middleware-cloudflare = { version = "0.7.1", features = ["d1-claims"] }
+bsv-middleware-cloudflare = { version = "0.7.2", features = ["d1-claims"] }
 ```
 
 ## Session storage backends

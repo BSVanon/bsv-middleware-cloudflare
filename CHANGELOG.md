@@ -3,6 +3,11 @@
 All notable changes to `bsv-middleware-cloudflare`. Versions below 1.0 may change public API between minor versions;
 patch versions are additive unless a line below says otherwise.
 
+## Core 0.4.1 and adapter 0.7.2 - 2026-10-22
+
+- bsv-rs ^0.8 (0.8.0's typed busy `Error::WalletBusy { detail, retry_after_ms }` and `Error` marked `#[non_exhaustive]`; nothing on the wire); no behavior change. Both SDK floors move from `bsv-rs = "0.7.0"` to `bsv-rs = "0.8"` (caret, so 0.8.1 resolves), feature lists and Rust 1.88 unchanged. This repository has no exhaustive `match` over `bsv_sdk::Error` (both conversions go through `Display`), so no wildcard arm was needed. The adapter depends on core `0.4.1`. The 22 vectors are unchanged.
+- Migration for every host: re-pin adapter 0.7.2 / core 0.4.1 on `bsv-rs = "0.8"`, so each lock holds one bsv-rs (0.8.x); add a wildcard arm to any exhaustive `match` over `bsv_sdk::Error` in the host.
+
 ## Adapter 0.7.1 - 2026-10-19
 
 > m14 fail closed: every door, 503 retryable, quote and prefix kept, a Retry-After; the reference's own shape (ts-stack fb1b2da, payment middleware: 503 ERR_PAYMENT_UNAVAILABLE when the replay store throws).

@@ -7,10 +7,10 @@ rules to its runtime; `bsv-middleware-cloudflare` 0.7.0 is the Cloudflare Worker
 ## Install
 
 ```toml
-bsv-middleware-core = "0.4.0"
+bsv-middleware-core = "0.4.1"
 ```
 
-The SDK floor is bsv-rs 0.7.0 (caret); core 0.4.0 provides a source API and an optional work limit.
+The SDK floor is bsv-rs 0.8 (caret, since core 0.4.1); core 0.4.0 provides a source API and an optional work limit.
 A script declining under a work or memory bound is payer-side `Unverifiable` with
 `SpendRefused`, naming the decline and input (400 `ERR_PAYMENT_INVALID` in the adapter).
 The crates set no bound themselves. The SDK's `MerklePath` refuses a lone hashed leaf
